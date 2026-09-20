@@ -1,0 +1,12 @@
+{
+  "name": "mirror-dimension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Doctor Strange style mirror dimension city simulator. Builds a single offline HTML file.",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:fresh": "node build.mjs --refetch"
+  },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>鏡像維度 · Mirror Dimension</title>
+<!--STYLE-->
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<header id="title" aria-live="polite">
+  <div id="cityName">—</div>
+  <div id="citySub">—</div>
+  <div id="seasonChip">—</div>
+</header>
+
+<button id="lang" type="button" aria-label="Switch language">EN</button>
+
+<aside id="panel">
+  <div class="row">
+    <span class="label" data-i18n="city"></span>
+    <div class="group" id="cities"></div>
+  </div>
+  <div class="row">
+    <span class="label" data-i18n="season"></span>
+    <div class="group" id="seasons"></div>
+  </div>
+  <div class="row slider">
+    <span class="label" data-i18n="mirror"></span>
+    <input id="mirror" type="range" min="0" max="1" step="0.001" value="0.35" aria-label="Mirror intensity">
+    <span id="mirrorVal" class="val">35%</span>
+  </div>
+  <div class="hint" data-i18n="hint"></div>
+  <div class="foot"><span id="stats"></span><span id="attribution" data-i18n="attribution"></span></div>
+</aside>
+
+<div id="loading"><div class="spinner"></div><div id="loadingText">載入中…</div></div>
+<div id="fallback" hidden>
+  <p>這個瀏覽器無法啟用 WebGL2,無法渲染鏡像維度。</p>
+  <p>This browser cannot start WebGL2, so the mirror dimension cannot be rendered.</p>
+</div>
+
+<!--APP-->
+</body>
+</html>
