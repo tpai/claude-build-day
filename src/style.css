@@ -17,7 +17,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); f
 #title { position: fixed; left: 28px; top: 24px; pointer-events: none; user-select: none; text-shadow: 0 2px 24px rgba(0, 0, 0, 0.6); }
 #cityName { font-size: clamp(30px, 4.6vw, 54px); font-weight: 600; letter-spacing: 0.02em; line-height: 1.05; transition: opacity 0.4s; }
 #citySub { margin-top: 6px; font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
-#seasonChip { display: inline-block; margin-top: 14px; padding: 5px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; border: 1px solid var(--line); background: var(--glass); backdrop-filter: blur(10px); }
+#timeChip { display: inline-block; margin-top: 14px; padding: 5px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; border: 1px solid var(--line); background: var(--glass); backdrop-filter: blur(10px); }
 #title.fade #cityName, #title.fade #citySub { opacity: 0; }
 
 #lang { position: fixed; right: 24px; top: 24px; padding: 7px 14px; border-radius: 999px; font: 600 12px/1 var(--font); letter-spacing: 0.12em; color: var(--fg); background: var(--glass); border: 1px solid var(--line); backdrop-filter: blur(12px); cursor: pointer; transition: border-color 0.2s, transform 0.2s; }

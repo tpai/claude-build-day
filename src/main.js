@@ -9,23 +9,23 @@ const loadingText = $('#loadingText');
 // ---------------------------------------------------------------- i18n
 const I18N = {
   zh: {
-    city: '城市', season: '季節', mirror: '鏡像強度',
-    hint: '拖曳旋轉 · 滾輪縮放 · 1–5 切城市 · Q/W/E/R 切季節 · H 隱藏面板',
+    city: '城市', time: '時段', mirror: '鏡像強度',
+    hint: '拖曳旋轉 · 滾輪縮放 · 1–5 切城市 · Q/W 切日夜 · H 隱藏面板',
     lang: 'EN', attribution: '© OpenStreetMap 貢獻者',
-    seasons: ['春', '夏', '秋', '冬'],
+    times: ['白天', '夜晚'],
     buildings: (n) => `${n} 棟建築`,
     loading: '正在展開城市…',
   },
   en: {
-    city: 'City', season: 'Season', mirror: 'Mirror',
-    hint: 'Drag to orbit · Scroll to zoom · 1–5 cities · Q/W/E/R seasons · H hides panel',
+    city: 'City', time: 'Time', mirror: 'Mirror',
+    hint: 'Drag to orbit · Scroll to zoom · 1–5 cities · Q/W day/night · H hides panel',
     lang: '繁中', attribution: '© OpenStreetMap contributors',
-    seasons: ['Spring', 'Summer', 'Autumn', 'Winter'],
+    times: ['Day', 'Night'],
     buildings: (n) => `${n} buildings`,
     loading: 'Unfolding the city…',
   },
 };
-// URL hash overrides, e.g. #city=2&season=winter&mirror=0.6&lang=en
+// URL hash overrides, e.g. #city=2&time=night&mirror=0.6&lang=en
 const HASH = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
 let lang = HASH.lang === 'en' || HASH.lang === 'zh' ? HASH.lang : (/^zh/i.test(navigator.language) ? 'zh' : 'en');
 
@@ -62,41 +62,26 @@ renderer.setSize(window.innerWidth, window.innerHeight, false);
 renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // manual gamma in post pass
 renderer.autoClear = true;
 
-// ---------------------------------------------------------------- seasons
+// ---------------------------------------------------------------- day / night
 const C = (hex) => new THREE.Color(hex);
-const SEASONS = [
-  { key: 'spring', shape: 0,
-    skyTop: C('#5f8fd6'), skyBottom: C('#f4cfe0'), sunColor: C('#fff1e2'), sunEl: 0.55, sunAz: 0.9,
-    skyLight: C('#c9d9f2'), groundLight: C('#5b5a66'), fog: C('#e3d2e3'), fogDensity: 0.00045,
-    buildingTint: C('#d9c9c4'), windowColor: C('#ffe6c4'), windowLit: 0.12,
-    groundBase: C('#3a4a44'), gridColor: C('#a5d6c8'),
-    water: C('#5b86a6'), grass: C('#7fb069'), canopy: C('#8cc070'), blossom: C('#f2a7c3'), blossomAmt: 1,
-    particle: C('#ffb7cb'), fall: 7, sway: 14, size: 3.6, spin: 1.0, opacity: 0.9,
-    grade: new THREE.Vector3(1.02, 0.98, 1.03), saturation: 1.05, vignette: 0.35 },
-  { key: 'summer', shape: 1,
-    skyTop: C('#1f5bbf'), skyBottom: C('#bfe4ff'), sunColor: C('#ffffff'), sunEl: 1.1, sunAz: 0.4,
+const TIMES = [
+  { key: 'day', shape: 1,
+    skyTop: C('#1f5bbf'), skyBottom: C('#bfe4ff'), sunColor: C('#ffffff'), sunEl: 1.0, sunAz: 0.5,
     skyLight: C('#bcd7ff'), groundLight: C('#6a665a'), fog: C('#d7edff'), fogDensity: 0.00028,
     buildingTint: C('#d9d6c8'), windowColor: C('#fff6d8'), windowLit: 0.05,
     groundBase: C('#3f4640'), gridColor: C('#ffe9a0'),
     water: C('#3d7ea6'), grass: C('#5a9a44'), canopy: C('#3f7f33'), blossom: C('#3f7f33'), blossomAmt: 0,
-    particle: C('#fff2a8'), fall: -3, sway: 6, size: 2.2, spin: 0.2, opacity: 0.85,
-    grade: new THREE.Vector3(1.0, 1.0, 0.96), saturation: 1.18, vignette: 0.25 },
-  { key: 'autumn', shape: 2,
-    skyTop: C('#332e63'), skyBottom: C('#f1a15c'), sunColor: C('#ffb277'), sunEl: 0.18, sunAz: 2.4,
-    skyLight: C('#c48c9a'), groundLight: C('#4a3a34'), fog: C('#c9774a'), fogDensity: 0.00055,
-    buildingTint: C('#b8a08c'), windowColor: C('#ffc77a'), windowLit: 0.72,
-    groundBase: C('#3a2c26'), gridColor: C('#ff9a4a'),
-    water: C('#4a4660'), grass: C('#a8873a'), canopy: C('#d3762b'), blossom: C('#b8402a'), blossomAmt: 1,
-    particle: C('#e57a2a'), fall: 10, sway: 26, size: 4.2, spin: 1.6, opacity: 0.95,
-    grade: new THREE.Vector3(1.08, 0.95, 0.86), saturation: 1.1, vignette: 0.45 },
-  { key: 'winter', shape: 3,
-    skyTop: C('#1c2a42'), skyBottom: C('#aebdd0'), sunColor: C('#dfe9ff'), sunEl: 0.28, sunAz: -0.6,
-    skyLight: C('#b3c1d6'), groundLight: C('#4e5663'), fog: C('#a6b3c4'), fogDensity: 0.0007,
-    buildingTint: C('#b9c3cf'), windowColor: C('#ffe9c2'), windowLit: 0.5,
-    groundBase: C('#7d8896'), gridColor: C('#e8f0ff'),
-    water: C('#5f7389'), grass: C('#b9c4cc'), canopy: C('#cfd8e2'), blossom: C('#cfd8e2'), blossomAmt: 0,
-    particle: C('#ffffff'), fall: 16, sway: 8, size: 3.2, spin: 0.1, opacity: 0.95,
-    grade: new THREE.Vector3(0.93, 0.97, 1.08), saturation: 0.72, vignette: 0.4 },
+    particle: C('#fff2a8'), fall: -3, sway: 6, size: 2.2, spin: 0.2, opacity: 0.55,
+    grade: new THREE.Vector3(1.0, 1.0, 0.96), saturation: 1.15, vignette: 0.25 },
+  { key: 'night', shape: 1,
+    // a low moon, a warm city glow on the horizon and fireflies in the parks
+    skyTop: C('#04070f'), skyBottom: C('#2a2438'), sunColor: C('#9aa8c8'), sunEl: 0.55, sunAz: -1.6,
+    skyLight: C('#2a3452'), groundLight: C('#16181f'), fog: C('#0e1220'), fogDensity: 0.00055,
+    buildingTint: C('#6f7686'), windowColor: C('#ffd59a'), windowLit: 0.55,
+    groundBase: C('#191c24'), gridColor: C('#5fa8ff'),
+    water: C('#0b1728'), grass: C('#1c3222'), canopy: C('#213a29'), blossom: C('#213a29'), blossomAmt: 0,
+    particle: C('#ffd27a'), fall: -1, sway: 14, size: 2.6, spin: 0.3, opacity: 0.7,
+    grade: new THREE.Vector3(0.88, 0.92, 1.12), saturation: 0.95, vignette: 0.55 },
 ];
 
 function sunDir(s) {
@@ -613,6 +598,7 @@ const skyMat = new THREE.ShaderMaterial({
     uSkyTop: { value: cur.skyTop }, uSkyBottom: { value: cur.skyBottom },
     uSunDir: { value: cur.sunDir }, uSunColor: { value: cur.sunColor },
     uIntensity: foldUniforms.uIntensity, uTime: foldUniforms.uTime,
+    uNight: nightUniform,
   },
 });
 const sky = new THREE.Mesh(new THREE.SphereGeometry(6000, 32, 16), skyMat);
@@ -735,23 +721,23 @@ function updateCamera(dt, t) {
 // ---------------------------------------------------------------- state
 const state = {
   cityIndex: 0,
-  seasonIndex: 2,
+  timeIndex: 0,
   sliderMirror: 0.35,
   mirror: 0.35,
   transition: null, // { phase: 'in' | 'out', nextCity }
-  prevSeason: 0, seasonBlend: 1,
+  prevTime: 0, timeBlend: 1,
   panelHidden: false,
 };
-// month -> season: Dec–Feb winter, Mar–May spring, Jun–Aug summer, Sep–Nov autumn
-state.seasonIndex = [3, 3, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3][new Date().getMonth()];
+// follow the clock: night between 19:00 and 06:00
+{ const h = new Date().getHours(); state.timeIndex = h >= 19 || h < 6 ? 1 : 0; }
 {
-  const si = ['spring', 'summer', 'autumn', 'winter'].indexOf(HASH.season);
-  if (si >= 0) state.seasonIndex = si;
+  const ti = ['day', 'night'].indexOf(HASH.time);
+  if (ti >= 0) state.timeIndex = ti;
   const m = parseFloat(HASH.mirror);
   if (Number.isFinite(m)) state.sliderMirror = THREE.MathUtils.clamp(m, 0, 1);
 }
-state.prevSeason = state.seasonIndex;
-setPalette(cur, SEASONS[state.seasonIndex]);
+state.prevTime = state.timeIndex;
+setPalette(cur, TIMES[state.timeIndex]);
 
 const decodedCities = new Map();
 let traffic = null, crowd = null;
@@ -837,13 +823,13 @@ function requestCity(i) {
   $('#title').classList.add('fade');
 }
 
-function setSeason(i) {
-  if (i === state.seasonIndex) return;
-  state.prevSeason = state.seasonIndex;
-  state.seasonIndex = i;
-  state.seasonBlend = 0;
+function setTime(i) {
+  if (i === state.timeIndex) return;
+  state.prevTime = state.timeIndex;
+  state.timeIndex = i;
+  state.timeBlend = 0;
   updateTitle();
-  document.querySelectorAll('#seasons button').forEach((b, j) => b.classList.toggle('active', j === i));
+  document.querySelectorAll('#times button').forEach((b, j) => b.classList.toggle('active', j === i));
 }
 
 // ---------------------------------------------------------------- UI
@@ -851,14 +837,14 @@ function updateTitle() {
   const c = CITY_DATA[state.cityIndex];
   $('#cityName').textContent = c.name[lang];
   $('#citySub').textContent = c.sub[lang];
-  $('#seasonChip').textContent = I18N[lang].seasons[state.seasonIndex];
+  $('#timeChip').textContent = I18N[lang].times[state.timeIndex];
 }
 function applyLang() {
   document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = I18N[lang][el.dataset.i18n]; });
   $('#lang').textContent = I18N[lang].lang;
   document.querySelectorAll('#cities button').forEach((b, i) => { b.firstChild.textContent = CITY_DATA[i].name[lang]; });
-  document.querySelectorAll('#seasons button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].seasons[i]; });
+  document.querySelectorAll('#times button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].times[i]; });
   $('#stats').textContent = I18N[lang].buildings(CITY_DATA[state.cityIndex].count);
   updateTitle();
 }
@@ -874,8 +860,8 @@ function makeButtons(container, items, keys, onClick) {
   });
 }
 makeButtons($('#cities'), CITY_DATA.map((c) => c.name[lang]), ['1', '2', '3', '4', '5'], requestCity);
-makeButtons($('#seasons'), I18N[lang].seasons, ['Q', 'W', 'E', 'R'], setSeason);
-document.querySelectorAll('#seasons button')[state.seasonIndex].classList.add('active');
+makeButtons($('#times'), I18N[lang].times, ['Q', 'W'], setTime);
+document.querySelectorAll('#times button')[state.timeIndex].classList.add('active');
 
 const slider = $('#mirror');
 const setSlider = (v) => {
@@ -892,7 +878,8 @@ addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement && e.key.startsWith('Arrow')) return;
   const k = e.key.toLowerCase();
   if (k >= '1' && k <= '5') requestCity(parseInt(k) - 1);
-  else if ('qwer'.includes(k) && k.length === 1) setSeason('qwer'.indexOf(k));
+  else if (k === 'q') setTime(0);
+  else if (k === 'w') setTime(1);
   else if (k === 'h') { state.panelHidden = !state.panelHidden; $('#panel').classList.toggle('hidden', state.panelHidden); }
   else if (k === 'l') { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); }
   else if (k === '[') setSlider(state.sliderMirror - 0.05);
@@ -923,12 +910,12 @@ function frame() {
   foldUniforms.uIntensity.value = state.mirror;
   foldUniforms.uTime.value = elapsed;
 
-  // season interpolation
-  state.seasonBlend = Math.min(1, state.seasonBlend + dt / 1.6);
-  lerpPalette(cur, SEASONS[state.seasonIndex], 1 - Math.exp(-dt * 2.6));
-  const shapeSeason = state.seasonBlend < 0.5 ? state.prevSeason : state.seasonIndex;
-  partMat.uniforms.uShape.value = SEASONS[shapeSeason].shape;
-  partMat.uniforms.uOpacity.value = cur.opacity * (1 - 0.9 * Math.sin(state.seasonBlend * Math.PI) ** 2);
+  // day / night interpolation
+  state.timeBlend = Math.min(1, state.timeBlend + dt / 1.6);
+  lerpPalette(cur, TIMES[state.timeIndex], 1 - Math.exp(-dt * 2.0));
+  const shapeTime = state.timeBlend < 0.5 ? state.prevTime : state.timeIndex;
+  partMat.uniforms.uShape.value = TIMES[shapeTime].shape;
+  partMat.uniforms.uOpacity.value = cur.opacity * (1 - 0.9 * Math.sin(state.timeBlend * Math.PI) ** 2);
   partMat.uniforms.uFall.value = cur.fall; partMat.uniforms.uSway.value = cur.sway;
   partMat.uniforms.uSize.value = cur.size; partMat.uniforms.uSpin.value = cur.spin;
   lightUniforms.uFogDensity.value = cur.fogDensity;
