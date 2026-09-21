@@ -2,7 +2,8 @@
 
 奇異博士風格的城市模擬器:真實城市的 OSM 建築足跡與街道網,在 Three.js 裡摺疊、扭轉、萬花筒化。
 建築有程序化的窗戶、玻璃帷幕、店面與屋頂設備;街道有人行道、車道線、斑馬線;
-車輛沿真實路網行駛(依路口轉彎、遵守單行道與各城市的行駛方向),行人在人行道上走動。
+車輛沿真實路網行駛(依路口轉彎、遵守單行道與各城市的行駛方向),行人在人行道上走動;
+河流、港灣(塞納河、維多利亞港)與公園來自 OSM 水域/綠地多邊形與海岸線,公園裡種滿隨季節變色的樹。
 四個季節、五座城市、一個「鏡像強度」滑桿。整個示範是**一個完全離線的 HTML 檔**。
 
 ## 使用
@@ -38,7 +39,8 @@ node build.mjs --quick     # 只用已快取的城市,產出 dist/mirror-dimensi
 ```
 
 Overpass 公開節點常常 504,腳本會在多個鏡像之間輪替重試最多 15 次;
-抓到的原始資料快取在 `data/<city>.raw.json`(建築)與 `data/<city>.roads.raw.json`(道路),刪掉該檔即可強制重抓單一城市。
+抓到的原始資料快取在 `data/<city>.raw.json`(建築)、`data/<city>.roads.raw.json`(道路)與 `data/<city>.areas.raw.json`(水域、綠地、海岸線),刪掉該檔即可強制重抓單一城市。
+水域與綠地在建置時光柵化成一張 1024² 的 PNG 遮罩(R = 水、G = 綠地;多邊形用奇偶填充處理島嶼等內環,海岸線則畫成邊界後從海側洪水填充)。
 
 需要 Node 20 以上,建置時需要網路(Overpass API 與 jsDelivr)。產出檔在 `dist/mirror-dimension.html`。
 
@@ -47,16 +49,17 @@ Overpass 公開節點常常 504,腳本會在多個鏡像之間輪替重試最多
 ## 結構
 
 ```
-build.mjs            抓取 OSM 建築與道路、簡化幾何、打包成 int16 base64、內聯一切
+build.mjs            抓取 OSM 建築、道路與水域/綠地,簡化幾何、打包成 int16 base64 與 PNG 遮罩、內聯一切
 src/index.html       HTML 模板(<!--STYLE--> 與 <!--APP--> 會被取代)
 src/style.css        介面樣式
-src/main.js          主程式:解碼城市與路網、擠出建築、道路緞帶、車流/行人模擬、季節插值、鏡頭、後製、UI
+src/main.js          主程式:解碼城市與路網、擠出建築、道路緞帶、車流/行人模擬、遮罩解碼與種樹、季節插值、鏡頭、後製、UI
 src/shaders/         fold.glsl(共用摺疊)、lighting.glsl(共用光照/霧)、
-                     building(三種立面 + 店面 + 屋頂)、road(柏油/人行道/標線)、car、people、ground、sky、particles、post
+                     building(三種立面 + 店面 + 屋頂)、road(柏油/人行道/標線)、car、people、tree、
+                     ground(鋪面 + 草地 + 水面)、sky、particles、post
 data/                快取:*.raw.json(Overpass 原始回應)、three.module.min.js
 dist/                產出的單檔 HTML
 ```
 
 ## 資料來源
 
-建築與道路資料 © OpenStreetMap 貢獻者,依 ODbL 授權。Three.js 依 MIT 授權。
+建築、道路、水域與綠地資料 © OpenStreetMap 貢獻者,依 ODbL 授權。Three.js 依 MIT 授權。

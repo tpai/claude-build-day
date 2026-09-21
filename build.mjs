@@ -3,6 +3,7 @@
 // and packs them into a compact binary blob, downloads Three.js, and inlines
 // everything (JS, shaders, CSS, data) into a single offline HTML file.
 import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { deflateSync } from 'node:zlib';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,6 +31,9 @@ const OUT = join(DIST, QUICK ? 'mirror-dimension-preview.html' : 'mirror-dimensi
 const RADIUS_M = 800;         // fetch radius around each city centre
 const MAX_BUILDINGS = 3000;   // per city, nearest to centre kept
 const MAX_ROADS = 2600;       // per city, major roads first, then nearest to centre
+const GROUND_M = 2600;        // ground plane size (must match main.js)
+const MASK_PX = 1024;         // water / park mask resolution over the ground plane (~2.5 m per pixel)
+const AREA_RADIUS_M = 1300;   // fetch water and parks out to the edge of the ground plane
 const MIN_AREA_M2 = 25;       // drop tiny footprints
 const SIMPLIFY_TOL_M = 0.6;   // vertex removal tolerance
 const CLAMP_M = RADIUS_M * 1.25;
@@ -58,6 +62,18 @@ const log = (...a) => console.log('[build]', ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const exists = (p) => stat(p).then(() => true, () => false);
 
+// water and green areas -> mask channel (0 = water / red, 1 = green / green)
+const AREA_TAGS = {
+  natural: { water: 0, wood: 1, scrub: 1, grassland: 1 },
+  waterway: { riverbank: 0 },
+  leisure: { park: 1, garden: 1, recreation_ground: 1 },
+  landuse: { grass: 1, forest: 1, meadow: 1, village_green: 1 },
+};
+const areaKind = (tags) => {
+  for (const [k, v] of Object.entries(AREA_TAGS)) if (tags[k] in v) return v[tags[k]];
+  return -1;
+};
+
 // ---------------------------------------------------------------- fetching
 async function fetchOverpass(city, kind = 'building') {
   const rawPath = join(DATA, kind === 'building' ? `${city.key}.raw.json` : `${city.key}.${kind}.raw.json`);
@@ -66,10 +82,21 @@ async function fetchOverpass(city, kind = 'building') {
     return JSON.parse(await readFile(rawPath, 'utf8'));
   }
   const radius = city.radius ?? RADIUS_M;
-  const selector = kind === 'building'
-    ? 'way["building"]'
-    : `way["highway"~"^(${Object.keys(ROAD_CLASS).join('|')})$"]["area"!="yes"]`;
-  const query = `[out:json][timeout:90];${selector}(around:${radius},${city.lat},${city.lon});out geom;`;
+  const at = `(around:${radius},${city.lat},${city.lon})`;
+  let body;
+  if (kind === 'building') body = `way["building"]${at};`;
+  else if (kind === 'roads') body = `way["highway"~"^(${Object.keys(ROAD_CLASS).join('|')})$"]["area"!="yes"]${at};`;
+  else { // areas: polygons and multipolygon relations for water / parks, plus the coastline
+    const atA = `(around:${AREA_RADIUS_M},${city.lat},${city.lon})`;
+    const parts = ['way["natural"="coastline"]' + atA + ';'];
+    for (const [k, v] of Object.entries(AREA_TAGS)) {
+      const re = `["${k}"~"^(${Object.keys(v).join('|')})$"]`;
+      parts.push(`way${re}${atA};`, `relation${re}${atA};`);
+    }
+    body = `(${parts.join('')});`;
+  }
+  const query = `[out:json][timeout:90];${body}out geom;`;
+  if (!REFETCH) await sleep(1500); // be polite to Overpass between the queries of one city
   let lastErr;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
@@ -279,11 +306,143 @@ function encodeRoads(roads) {
   return buf.toString('base64');
 }
 
+// ---------------------------------------------------------------- areas (water + parks)
+// Rasterised into an RGB mask over the ground plane: R = water, G = green.
+// Polygons use even-odd scanline fill, so multipolygon holes (islands in a river)
+// just work; the coastline is drawn as a barrier and the sea flood-filled from its
+// right-hand side (OSM convention: water on the right).
+const samePt = (a, b) => Math.abs(a.lat - b.lat) < 1e-7 && Math.abs(a.lon - b.lon) < 1e-7;
+
+function assembleRings(ways) {
+  const pool = ways.filter((w) => w.length >= 2).map((w) => w.slice());
+  const rings = [];
+  while (pool.length) {
+    const ring = pool.pop();
+    let guard = 0;
+    while (!samePt(ring[0], ring[ring.length - 1]) && guard++ < 10000) {
+      const end = ring[ring.length - 1];
+      let found = -1, rev = false;
+      for (let i = 0; i < pool.length; i++) {
+        if (samePt(pool[i][0], end)) { found = i; break; }
+        if (samePt(pool[i][pool[i].length - 1], end)) { found = i; rev = true; break; }
+      }
+      if (found < 0) break;
+      const w = pool.splice(found, 1)[0];
+      if (rev) w.reverse();
+      ring.push(...w.slice(1));
+    }
+    if (ring.length >= 3) rings.push(ring);
+  }
+  return rings;
+}
+
+function fillRings(mask, W, H, rings, channel) {
+  // rings: arrays of [px, py]; even-odd rule across all rings at once
+  let minY = Infinity, maxY = -Infinity;
+  for (const r of rings) for (const [, y] of r) { minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+  const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(H - 1, Math.ceil(maxY));
+  const xs = [];
+  for (let y = y0; y <= y1; y++) {
+    const sy = y + 0.5;
+    xs.length = 0;
+    for (const r of rings) {
+      for (let i = 0; i < r.length; i++) {
+        const [ax, ay] = r[i], [bx, by] = r[(i + 1) % r.length];
+        if ((ay <= sy) === (by <= sy)) continue;
+        xs.push(ax + (sy - ay) / (by - ay) * (bx - ax));
+      }
+    }
+    xs.sort((a, b) => a - b);
+    for (let i = 0; i + 1 < xs.length; i += 2) {
+      const xa = Math.max(0, Math.round(xs[i])), xb = Math.min(W, Math.round(xs[i + 1]));
+      for (let x = xa; x < xb; x++) mask[(y * W + x) * 3 + channel] = 255;
+    }
+  }
+}
+
+function processAreas(city, raw) {
+  const proj = project(city);
+  const W = MASK_PX, H = MASK_PX;
+  const toPx = (n) => { const [x, z] = proj(n.lat, n.lon); return [(x / GROUND_M + 0.5) * W, (z / GROUND_M + 0.5) * H]; };
+  const mask = Buffer.alloc(W * H * 3);
+  const coast = [];
+  let nWater = 0, nGreen = 0;
+  for (const el of raw.elements) {
+    const tags = el.tags || {};
+    if (el.type === 'way' && tags.natural === 'coastline' && el.geometry) { coast.push(el.geometry.map(toPx)); continue; }
+    const kind = areaKind(tags);
+    if (kind < 0) continue;
+    let rings;
+    if (el.type === 'way' && el.geometry) rings = [el.geometry];
+    else if (el.type === 'relation' && el.members) rings = assembleRings(el.members.filter((m) => m.type === 'way' && m.geometry && (m.role === 'outer' || m.role === 'inner')).map((m) => m.geometry));
+    else continue;
+    fillRings(mask, W, H, rings.map((r) => r.map(toPx)), kind);
+    if (kind === 0) nWater++; else nGreen++;
+  }
+  // coastline -> sea: draw the lines as a barrier, flood fill from the water side
+  let seaFrac = 0;
+  if (coast.length) {
+    const barrier = new Uint8Array(W * H);
+    const seeds = [];
+    for (const line of coast) {
+      for (let i = 0; i + 1 < line.length; i++) {
+        const [ax, ay] = line[i], [bx, by] = line[i + 1];
+        const len = Math.hypot(bx - ax, by - ay);
+        const steps = Math.max(1, Math.ceil(len * 2));
+        for (let s = 0; s <= steps; s++) {
+          const x = Math.round(ax + (bx - ax) * s / steps), y = Math.round(ay + (by - ay) * s / steps);
+          if (x >= 0 && x < W && y >= 0 && y < H) barrier[y * W + x] = 1;
+        }
+        // water is on the right in lat/lon; in our (x, z = -lat) frame that is (-dz, dx)
+        if (len > 2) { const dx = (bx - ax) / len, dy = (by - ay) / len; seeds.push([Math.round((ax + bx) / 2 - dy * 2.5), Math.round((ay + by) / 2 + dx * 2.5)]); }
+      }
+    }
+    const sea = new Uint8Array(W * H);
+    const stack = [];
+    for (const [x, y] of seeds) if (x >= 0 && x < W && y >= 0 && y < H && !barrier[y * W + x]) stack.push(y * W + x);
+    let filled = 0;
+    while (stack.length) {
+      const i = stack.pop();
+      if (sea[i] || barrier[i]) continue;
+      sea[i] = 1; filled++;
+      const x = i % W, y = (i - x) / W;
+      if (x > 0) stack.push(i - 1);
+      if (x < W - 1) stack.push(i + 1);
+      if (y > 0) stack.push(i - W);
+      if (y < H - 1) stack.push(i + W);
+    }
+    seaFrac = filled / (W * H);
+    if (seaFrac < 0.9) { for (let i = 0; i < W * H; i++) if (sea[i] || barrier[i]) mask[i * 3] = 255; }
+    else log(`${city.key}: coastline flood fill leaked (${(seaFrac * 100).toFixed(0)}%), ignoring coastline`);
+  }
+  let water = 0, green = 0;
+  for (let i = 0; i < W * H; i++) { if (mask[i * 3]) water++; if (mask[i * 3 + 1]) green++; }
+  const png = encodePng(W, H, mask);
+  log(`${city.key}: ${raw.elements.length} area elements -> ${nWater} water + ${nGreen} green polygons, ${coast.length} coastline ways; water ${(water / W / H * 100).toFixed(1)}%, green ${(green / W / H * 100).toFixed(1)}% of ground, mask ${(png.length / 1024).toFixed(0)} KB`);
+  return png.toString('base64');
+}
+
+const CRC_TABLE = new Int32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c; });
+function crc32(buf) { let c = -1; for (const b of buf) c = CRC_TABLE[(c ^ b) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; }
+function encodePng(w, h, rgb) {
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) rgb.copy(raw, y * (w * 3 + 1) + 1, y * w * 3, (y + 1) * w * 3); // filter byte 0 per row
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
+}
+
 // ---------------------------------------------------------------- assemble
 const escapeForScript = (s) => s.replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
 
 async function readShaders() {
-  const names = ['fold.glsl', 'lighting.glsl', 'building.vert', 'building.frag', 'ground.vert', 'ground.frag', 'road.vert', 'road.frag', 'car.vert', 'car.frag', 'people.vert', 'people.frag', 'sky.vert', 'sky.frag', 'particles.vert', 'particles.frag', 'post.vert', 'post.frag'];
+  const names = ['fold.glsl', 'lighting.glsl', 'building.vert', 'building.frag', 'ground.vert', 'ground.frag', 'road.vert', 'road.frag', 'car.vert', 'car.frag', 'tree.vert', 'tree.frag', 'people.vert', 'people.frag', 'sky.vert', 'sky.frag', 'particles.vert', 'particles.frag', 'post.vert', 'post.frag'];
   const shaders = {};
   for (const n of names) shaders[n] = await readFile(join(SRC, 'shaders', n), 'utf8');
   return shaders;
@@ -297,12 +456,14 @@ async function main() {
 
   const cities = [];
   for (const city of CITIES) {
-    if (QUICK && !(await exists(join(DATA, `${city.key}.raw.json`)) && await exists(join(DATA, `${city.key}.roads.raw.json`)))) { log(`${city.key}: not cached, skipped (--quick)`); continue; }
+    if (QUICK && !(await exists(join(DATA, `${city.key}.raw.json`)) && await exists(join(DATA, `${city.key}.roads.raw.json`)) && await exists(join(DATA, `${city.key}.areas.raw.json`)))) { log(`${city.key}: not cached, skipped (--quick)`); continue; }
     const raw = await fetchOverpass(city);
     const { buildings, maxH, count } = processCity(city, raw);
     const roadsRaw = await fetchOverpass(city, 'roads');
     const roads = processRoads(city, roadsRaw);
-    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads) });
+    const areasRaw = await fetchOverpass(city, 'areas');
+    const areas = processAreas(city, areasRaw);
+    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads), areas });
     if (!REFETCH) continue;
     await sleep(2000); // be polite to Overpass
   }
@@ -328,7 +489,7 @@ async function main() {
   await writeFile(OUT, html);
   const size = (await stat(OUT)).size;
   log(`wrote ${OUT} (${(size / 1024 / 1024).toFixed(2)} MB)`);
-  for (const c of cities) log(`  ${c.key}: ${c.count} buildings, ${(c.data.length / 1024).toFixed(0)} KB + roads ${(c.roads.length / 1024).toFixed(0)} KB base64`);
+  for (const c of cities) log(`  ${c.key}: ${c.count} buildings, ${(c.data.length / 1024).toFixed(0)} KB + roads ${(c.roads.length / 1024).toFixed(0)} KB + areas ${(c.areas.length / 1024).toFixed(0)} KB base64`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

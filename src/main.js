@@ -70,6 +70,7 @@ const SEASONS = [
     skyLight: C('#c9d9f2'), groundLight: C('#5b5a66'), fog: C('#e3d2e3'), fogDensity: 0.00045,
     buildingTint: C('#d9c9c4'), windowColor: C('#ffe6c4'), windowLit: 0.12,
     groundBase: C('#3a4a44'), gridColor: C('#a5d6c8'),
+    water: C('#5b86a6'), grass: C('#7fb069'), canopy: C('#8cc070'), blossom: C('#f2a7c3'), blossomAmt: 1,
     particle: C('#ffb7cb'), fall: 7, sway: 14, size: 3.6, spin: 1.0, opacity: 0.9,
     grade: new THREE.Vector3(1.02, 0.98, 1.03), saturation: 1.05, vignette: 0.35 },
   { key: 'summer', shape: 1,
@@ -77,6 +78,7 @@ const SEASONS = [
     skyLight: C('#bcd7ff'), groundLight: C('#6a665a'), fog: C('#d7edff'), fogDensity: 0.00028,
     buildingTint: C('#d9d6c8'), windowColor: C('#fff6d8'), windowLit: 0.05,
     groundBase: C('#3f4640'), gridColor: C('#ffe9a0'),
+    water: C('#3d7ea6'), grass: C('#5a9a44'), canopy: C('#3f7f33'), blossom: C('#3f7f33'), blossomAmt: 0,
     particle: C('#fff2a8'), fall: -3, sway: 6, size: 2.2, spin: 0.2, opacity: 0.85,
     grade: new THREE.Vector3(1.0, 1.0, 0.96), saturation: 1.18, vignette: 0.25 },
   { key: 'autumn', shape: 2,
@@ -84,6 +86,7 @@ const SEASONS = [
     skyLight: C('#c48c9a'), groundLight: C('#4a3a34'), fog: C('#c9774a'), fogDensity: 0.00055,
     buildingTint: C('#b8a08c'), windowColor: C('#ffc77a'), windowLit: 0.72,
     groundBase: C('#3a2c26'), gridColor: C('#ff9a4a'),
+    water: C('#4a4660'), grass: C('#a8873a'), canopy: C('#d3762b'), blossom: C('#b8402a'), blossomAmt: 1,
     particle: C('#e57a2a'), fall: 10, sway: 26, size: 4.2, spin: 1.6, opacity: 0.95,
     grade: new THREE.Vector3(1.08, 0.95, 0.86), saturation: 1.1, vignette: 0.45 },
   { key: 'winter', shape: 3,
@@ -91,6 +94,7 @@ const SEASONS = [
     skyLight: C('#b3c1d6'), groundLight: C('#4e5663'), fog: C('#a6b3c4'), fogDensity: 0.0007,
     buildingTint: C('#b9c3cf'), windowColor: C('#ffe9c2'), windowLit: 0.5,
     groundBase: C('#7d8896'), gridColor: C('#e8f0ff'),
+    water: C('#5f7389'), grass: C('#b9c4cc'), canopy: C('#cfd8e2'), blossom: C('#cfd8e2'), blossomAmt: 0,
     particle: C('#ffffff'), fall: 16, sway: 8, size: 3.2, spin: 0.1, opacity: 0.95,
     grade: new THREE.Vector3(0.93, 0.97, 1.08), saturation: 0.72, vignette: 0.4 },
 ];
@@ -105,19 +109,22 @@ const cur = {
   skyLight: new THREE.Color(), groundLight: new THREE.Color(), fog: new THREE.Color(), fogDensity: 0,
   buildingTint: new THREE.Color(), windowColor: new THREE.Color(), windowLit: 0,
   groundBase: new THREE.Color(), gridColor: new THREE.Color(),
+  water: new THREE.Color(), grass: new THREE.Color(), canopy: new THREE.Color(), blossom: new THREE.Color(), blossomAmt: 0,
   particle: new THREE.Color(), fall: 0, sway: 0, size: 0, spin: 0, opacity: 0,
   grade: new THREE.Vector3(), saturation: 1, vignette: 0.3,
 };
+const COLOR_KEYS = ['skyTop', 'skyBottom', 'sunColor', 'skyLight', 'groundLight', 'fog', 'buildingTint', 'windowColor', 'groundBase', 'gridColor', 'water', 'grass', 'canopy', 'blossom', 'particle'];
+const SCALAR_KEYS = ['fogDensity', 'windowLit', 'blossomAmt', 'fall', 'sway', 'size', 'spin', 'opacity', 'saturation', 'vignette'];
 function setPalette(target, s) {
-  for (const k of ['skyTop', 'skyBottom', 'sunColor', 'skyLight', 'groundLight', 'fog', 'buildingTint', 'windowColor', 'groundBase', 'gridColor', 'particle']) target[k].copy(s[k]);
+  for (const k of COLOR_KEYS) target[k].copy(s[k]);
   target.sunDir.copy(sunDir(s));
-  for (const k of ['fogDensity', 'windowLit', 'fall', 'sway', 'size', 'spin', 'opacity', 'saturation', 'vignette']) target[k] = s[k];
+  for (const k of SCALAR_KEYS) target[k] = s[k];
   target.grade.copy(s.grade);
 }
 function lerpPalette(target, s, t) {
-  for (const k of ['skyTop', 'skyBottom', 'sunColor', 'skyLight', 'groundLight', 'fog', 'buildingTint', 'windowColor', 'groundBase', 'gridColor', 'particle']) target[k].lerp(s[k], t);
+  for (const k of COLOR_KEYS) target[k].lerp(s[k], t);
   target.sunDir.lerp(sunDir(s), t).normalize();
-  for (const k of ['fogDensity', 'windowLit', 'fall', 'sway', 'size', 'spin', 'opacity', 'saturation', 'vignette']) target[k] += (s[k] - target[k]) * t;
+  for (const k of SCALAR_KEYS) target[k] += (s[k] - target[k]) * t;
   target.grade.lerp(s.grade, t);
 }
 
@@ -144,7 +151,7 @@ function decodeCity(b64) {
 const fract = (x) => x - Math.floor(x);
 function hash01(i) {
   let x = (i * 2654435761) >>> 0;
-  x ^= x >>> 15; x = (x * 2246822519) >>> 0; x ^= x >>> 13;
+  x ^= x >>> 15; x = (x * 2246822519) >>> 0; x = (x ^ (x >>> 13)) >>> 0;
   return x / 4294967296;
 }
 
@@ -398,6 +405,54 @@ function makeAgents(roads, count, opts) {
   return { n, step, seed };
 }
 
+// ---------------------------------------------------------------- areas (water + parks)
+const GROUND_SIZE = 2600; // must match build.mjs GROUND_M
+// Decode the per-city PNG mask (R = water, G = parks) into a texture plus its pixels,
+// used by the ground shader and to scatter trees.
+function loadMask(b64) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement('canvas');
+      cv.width = img.width; cv.height = img.height;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const px = ctx.getImageData(0, 0, img.width, img.height).data;
+      const tex = new THREE.Texture(img);
+      tex.flipY = false; // row 0 is north (z = -size/2), matching the shader's uv = xz / size + 0.5
+      tex.minFilter = tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.generateMipmaps = false;
+      tex.needsUpdate = true;
+      resolve({ tex, px, w: img.width, h: img.height });
+    };
+    img.onerror = reject;
+    img.src = 'data:image/png;base64,' + b64;
+  });
+}
+
+// Scatter trees on the park mask: jittered grid, kept where the green channel is set.
+function scatterTrees(mask, max) {
+  const { px, w, h } = mask;
+  const step = 3; // pixels (~7.5 m)
+  const out = [];
+  for (let y = 1; y < h - 1; y += step) for (let x = 1; x < w - 1; x += step) {
+    const r = hash01(y * w + x);
+    if (r > 0.6) continue;
+    const jx = x + (hash01(x * 7 + y) - 0.5) * step, jy = y + (hash01(x + y * 13) - 0.5) * step;
+    const i = (Math.round(jy) * w + Math.round(jx)) * 4;
+    if (px[i + 1] < 128 || px[i] > 128) continue;
+    out.push((jx / w - 0.5) * GROUND_SIZE, (jy / h - 0.5) * GROUND_SIZE);
+  }
+  // too many: keep a random subset
+  let n = out.length / 2;
+  if (n > max) {
+    for (let i = n - 1; i > 0; i--) { const j = Math.floor(hash01(i * 31 + 7) * (i + 1)); [out[2 * i], out[2 * j]] = [out[2 * j], out[2 * i]]; [out[2 * i + 1], out[2 * j + 1]] = [out[2 * j + 1], out[2 * i + 1]]; }
+    n = max;
+  }
+  return { xz: out, n };
+}
+
 // ---------------------------------------------------------------- scene
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 1, 12000);
@@ -441,9 +496,16 @@ const groundMat = new THREE.ShaderMaterial({
     ...foldUniforms, ...lightUniforms,
     uGroundBase: { value: cur.groundBase },
     uGridColor: { value: cur.gridColor },
+    uWater: { value: cur.water },
+    uGrass: { value: cur.grass },
+    uMask: { value: null },
+    uGroundSize: { value: GROUND_SIZE },
   },
 });
-const groundGeo = new THREE.PlaneGeometry(2600, 2600, 104, 104);
+const emptyMask = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+emptyMask.needsUpdate = true;
+groundMat.uniforms.uMask.value = emptyMask;
+const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 104, 104);
 groundGeo.rotateX(-Math.PI / 2);
 const ground = new THREE.Mesh(groundGeo, groundMat);
 ground.position.y = -0.05;
@@ -494,6 +556,35 @@ cars.count = 0;
 scene.add(cars);
 const CAR_COLORS = ['#f2f2f0', '#f2f2f0', '#e9e9ea', '#1a1a1c', '#1a1a1c', '#8d9096', '#5a5d63', '#b8bcc2', '#9e1b1b', '#1f3f7a', '#2b4a3a', '#6f2a5a', '#c9772a'];
 const TAXI = { taipei: '#f4c20d', tokyo: '#151515', newyork: '#f7b500', hongkong: '#c8102e' };
+
+// trees: low-poly trunk + canopy, scattered on parks
+const MAX_TREES = 3500;
+function treeGeometry() {
+  const parts = [
+    new THREE.CylinderGeometry(0.22, 0.3, 2.6, 5).translate(0, 1.3, 0),
+    new THREE.IcosahedronGeometry(2.4, 0).scale(1, 1.25, 1).translate(0, 4.6, 0),
+  ];
+  const pos = [], nrm = [];
+  for (const g of parts) {
+    const ng = g.toNonIndexed();
+    ng.computeVertexNormals();
+    pos.push(...ng.getAttribute('position').array);
+    nrm.push(...ng.getAttribute('normal').array);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  return g;
+}
+const treeMat = new THREE.ShaderMaterial({
+  vertexShader: SHADERS['fold.glsl'] + SHADERS['tree.vert'],
+  fragmentShader: LIGHT + SHADERS['tree.frag'],
+  uniforms: { ...foldUniforms, ...lightUniforms, uCanopy: { value: cur.canopy }, uBlossom: { value: cur.blossom }, uBlossomAmt: { value: 0 } },
+});
+const trees = new THREE.InstancedMesh(treeGeometry(), treeMat, MAX_TREES);
+trees.frustumCulled = false;
+trees.count = 0;
+scene.add(trees);
 
 // pedestrians: point sprites, positions updated from the same graph walker
 const MAX_PEOPLE = 6000;
@@ -676,6 +767,29 @@ function loadCity(i) {
   roadMesh.geometry = entry.roadGeo;
   foldUniforms.uCurlR.value = Math.max(520, c.maxH + 90);
 
+  // water / parks mask and trees arrive once the PNG has decoded
+  groundMat.uniforms.uMask.value = emptyMask;
+  trees.count = 0;
+  if (!entry.mask) entry.mask = loadMask(c.areas).then((m) => ({ ...m, trees: scatterTrees(m, MAX_TREES) }));
+  entry.mask.then((m) => {
+    if (state.cityIndex !== i) return; // switched away while decoding
+    groundMat.uniforms.uMask.value = m.tex;
+    const { xz, n } = m.trees;
+    for (let k = 0; k < n; k++) {
+      const sc = 0.7 + 0.7 * hash01(k * 17 + 3);
+      carDummy.position.set(xz[2 * k], 0, xz[2 * k + 1]);
+      carDummy.rotation.set(0, hash01(k * 5 + 1) * Math.PI * 2, 0);
+      carDummy.scale.set(sc, sc * (0.9 + 0.3 * hash01(k * 3 + 9)), sc);
+      carDummy.updateMatrix();
+      trees.setMatrixAt(k, carDummy.matrix);
+      trees.setColorAt(k, new THREE.Color(hash01(k * 11 + 2), 0, hash01(k * 23 + 5)));
+    }
+    carDummy.scale.set(1, 1, 1);
+    trees.count = n;
+    trees.instanceMatrix.needsUpdate = true;
+    if (trees.instanceColor) trees.instanceColor.needsUpdate = true;
+  }).catch((e) => console.warn('area mask failed', e));
+
   // traffic keeps to the driving side of each city; oneway roads are respected
   const sideSign = c.driveLeft ? -1 : 1;
   traffic = makeAgents(entry.roads, MAX_CARS, {
@@ -820,6 +934,7 @@ function frame() {
   lightUniforms.uFogDensity.value = cur.fogDensity;
   buildingMat.uniforms.uWindowLit.value = cur.windowLit;
   nightUniform.value = THREE.MathUtils.smoothstep(cur.windowLit, 0.25, 0.7);
+  treeMat.uniforms.uBlossomAmt.value = cur.blossomAmt;
 
   // traffic + pedestrians
   if (traffic) {
@@ -860,3 +975,4 @@ state.mirror = HASH.intro === '0' ? state.sliderMirror : 1; // start folded, the
 requestAnimationFrame(frame);
 setTimeout(() => $('#loading').classList.add('done'), 150);
 console.info('mirror-dimension', BUILD_INFO);
+window.__md = { state, cur, trees, treeMat, cars, decodedCities }; // debugging handle
