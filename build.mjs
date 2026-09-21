@@ -29,31 +29,47 @@ const OUT = join(DIST, QUICK ? 'mirror-dimension-preview.html' : 'mirror-dimensi
 
 const RADIUS_M = 800;         // fetch radius around each city centre
 const MAX_BUILDINGS = 3000;   // per city, nearest to centre kept
+const MAX_ROADS = 2600;       // per city, major roads first, then nearest to centre
 const MIN_AREA_M2 = 25;       // drop tiny footprints
 const SIMPLIFY_TOL_M = 0.6;   // vertex removal tolerance
 const CLAMP_M = RADIUS_M * 1.25;
 
 const CITIES = [
   { key: 'taipei',   name: { zh: '台北', en: 'Taipei' },    sub: { zh: '信義區 · 台北 101', en: 'Xinyi District · Taipei 101' }, lat: 25.0350, lon: 121.5630, levels: [4, 12],  levelHeight: 3.3, radius: 1100 },
-  { key: 'tokyo',    name: { zh: '東京', en: 'Tokyo' },     sub: { zh: '新宿', en: 'Shinjuku' },                              lat: 35.6905, lon: 139.6960, levels: [3, 10],  levelHeight: 3.2 },
+  { key: 'tokyo',    name: { zh: '東京', en: 'Tokyo' },     sub: { zh: '新宿', en: 'Shinjuku' },                              lat: 35.6905, lon: 139.6960, levels: [3, 10],  levelHeight: 3.2, driveLeft: true },
   { key: 'newyork',  name: { zh: '紐約', en: 'New York' },  sub: { zh: '曼哈頓中城', en: 'Midtown Manhattan' },                 lat: 40.7535, lon: -73.9830, levels: [6, 30],  levelHeight: 3.6 },
   { key: 'paris',    name: { zh: '巴黎', en: 'Paris' },     sub: { zh: '西堤島 · 聖母院', en: 'Île de la Cité · Notre-Dame' },   lat: 48.8535, lon: 2.3480,   levels: [5, 7],   levelHeight: 3.2 },
-  { key: 'hongkong', name: { zh: '香港', en: 'Hong Kong' }, sub: { zh: '中環', en: 'Central' },                               lat: 22.2815, lon: 114.1585, levels: [10, 35], levelHeight: 3.4 },
+  { key: 'hongkong', name: { zh: '香港', en: 'Hong Kong' }, sub: { zh: '中環', en: 'Central' },                               lat: 22.2815, lon: 114.1585, levels: [10, 35], levelHeight: 3.4, driveLeft: true },
 ];
+
+// highway=* -> road class. Width, speed and who travels on it are derived from the class in main.js.
+const ROAD_CLASS = {
+  footway: 0, path: 0, steps: 0, cycleway: 0,
+  pedestrian: 1,
+  service: 2,
+  residential: 3, unclassified: 3, living_street: 3,
+  tertiary: 4, tertiary_link: 4,
+  secondary: 5, secondary_link: 5,
+  primary: 6, primary_link: 6,
+  trunk: 7, trunk_link: 7, motorway: 7, motorway_link: 7,
+};
 
 const log = (...a) => console.log('[build]', ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const exists = (p) => stat(p).then(() => true, () => false);
 
 // ---------------------------------------------------------------- fetching
-async function fetchOverpass(city) {
-  const rawPath = join(DATA, `${city.key}.raw.json`);
+async function fetchOverpass(city, kind = 'building') {
+  const rawPath = join(DATA, kind === 'building' ? `${city.key}.raw.json` : `${city.key}.${kind}.raw.json`);
   if (!REFETCH && await exists(rawPath)) {
     log(`${city.key}: using cached ${rawPath}`);
     return JSON.parse(await readFile(rawPath, 'utf8'));
   }
   const radius = city.radius ?? RADIUS_M;
-  const query = `[out:json][timeout:90];way["building"](around:${radius},${city.lat},${city.lon});out geom;`;
+  const selector = kind === 'building'
+    ? 'way["building"]'
+    : `way["highway"~"^(${Object.keys(ROAD_CLASS).join('|')})$"]["area"!="yes"]`;
+  const query = `[out:json][timeout:90];${selector}(around:${radius},${city.lat},${city.lon});out geom;`;
   let lastErr;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
@@ -69,7 +85,7 @@ async function fetchOverpass(city) {
       const json = await res.json();
       if (!Array.isArray(json.elements)) throw new Error('no elements in response');
       await writeFile(rawPath, JSON.stringify(json));
-      log(`${city.key}: got ${json.elements.length} ways`);
+      log(`${city.key}: got ${json.elements.length} ${kind} ways`);
       return json;
     } catch (e) {
       lastErr = e;
@@ -198,11 +214,76 @@ function encode(buildings) {
   return buf.toString('base64');
 }
 
+// ---------------------------------------------------------------- roads
+// Roads keep their OSM node ids so that cars and pedestrians can follow the real
+// street network: every node shared by two or more kept roads becomes an
+// intersection with a small integer id.
+function processRoads(city, raw) {
+  const proj = project(city);
+  const clamp = (city.radius ?? RADIUS_M) * 1.25;
+  const runs = [];
+  for (const el of raw.elements) {
+    if (el.type !== 'way' || !el.geometry || !el.nodes || el.geometry.length < 2) continue;
+    const tags = el.tags || {};
+    const cls = ROAD_CLASS[tags.highway];
+    if (cls === undefined) continue;
+    if (tags.tunnel === 'yes' || tags.layer && parseInt(tags.layer) < 0) continue;
+    const oneway = tags.oneway === 'yes' || tags.oneway === '1' || tags.junction === 'roundabout' || tags.highway === 'motorway';
+    // split the way into runs of points inside the clamp box
+    let run = null;
+    const flush = () => { if (run && run.pts.length >= 2) runs.push(run); run = null; };
+    el.geometry.forEach((g, i) => {
+      const [x, z] = proj(g.lat, g.lon);
+      if (Math.abs(x) > clamp || Math.abs(z) > clamp) { flush(); return; }
+      if (!run) run = { cls, oneway, pts: [], nodes: [] };
+      const prev = run.pts[run.pts.length - 1];
+      if (prev && Math.hypot(prev[0] - x, prev[1] - z) < 0.3) return; // drop duplicate vertices
+      run.pts.push([x, z]); run.nodes.push(el.nodes[i]);
+    });
+    flush();
+  }
+  for (const r of runs) {
+    let len = 0;
+    for (let i = 1; i < r.pts.length; i++) len += Math.hypot(r.pts[i][0] - r.pts[i - 1][0], r.pts[i][1] - r.pts[i - 1][1]);
+    r.len = len;
+    const mid = r.pts[Math.floor(r.pts.length / 2)];
+    r.d = Math.hypot(mid[0], mid[1]);
+  }
+  // drivable roads first (by class, then distance), then footways nearest to centre
+  runs.sort((a, b) => (b.cls >= 2) - (a.cls >= 2) || a.d - b.d);
+  const kept = runs.slice(0, MAX_ROADS);
+  // intersection ids: nodes used by >= 2 kept roads (or twice in one road, e.g. loops)
+  const count = new Map();
+  for (const r of kept) for (const n of r.nodes) count.set(n, (count.get(n) || 0) + 1);
+  const ids = new Map();
+  for (const [n, c] of count) if (c >= 2) ids.set(n, ids.size);
+  for (const r of kept) r.nodes = r.nodes.map((n) => ids.get(n) ?? -1);
+  const pts = kept.reduce((s, r) => s + r.pts.length, 0);
+  const km = kept.reduce((s, r) => s + r.len, 0) / 1000;
+  log(`${city.key}: ${raw.elements.length} highway ways -> ${runs.length} runs -> ${kept.length} kept, ${pts} pts, ${km.toFixed(1)} km, ${ids.size} intersections`);
+  return kept;
+}
+
+// Binary layout (little-endian int16): [N] then per road [nPts, cls | oneway << 4, (x*2, z*2, nodeId) * nPts]
+function encodeRoads(roads) {
+  let n = 1;
+  for (const r of roads) n += 2 + r.pts.length * 3;
+  const buf = Buffer.alloc(n * 2);
+  let o = 0;
+  const w = (v) => { buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), o); o += 2; };
+  w(roads.length);
+  for (const r of roads) {
+    w(r.pts.length); w(r.cls | (r.oneway ? 16 : 0));
+    r.pts.forEach(([x, z], i) => { w(x * 2); w(z * 2); w(r.nodes[i]); });
+  }
+  return buf.toString('base64');
+}
+
 // ---------------------------------------------------------------- assemble
 const escapeForScript = (s) => s.replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
 
 async function readShaders() {
-  const names = ['fold.glsl', 'building.vert', 'building.frag', 'ground.vert', 'ground.frag', 'sky.vert', 'sky.frag', 'particles.vert', 'particles.frag', 'post.vert', 'post.frag'];
+  const names = ['fold.glsl', 'lighting.glsl', 'building.vert', 'building.frag', 'ground.vert', 'ground.frag', 'road.vert', 'road.frag', 'car.vert', 'car.frag', 'people.vert', 'people.frag', 'sky.vert', 'sky.frag', 'particles.vert', 'particles.frag', 'post.vert', 'post.frag'];
   const shaders = {};
   for (const n of names) shaders[n] = await readFile(join(SRC, 'shaders', n), 'utf8');
   return shaders;
@@ -216,10 +297,12 @@ async function main() {
 
   const cities = [];
   for (const city of CITIES) {
-    if (QUICK && !(await exists(join(DATA, `${city.key}.raw.json`)))) { log(`${city.key}: not cached, skipped (--quick)`); continue; }
+    if (QUICK && !(await exists(join(DATA, `${city.key}.raw.json`)) && await exists(join(DATA, `${city.key}.roads.raw.json`)))) { log(`${city.key}: not cached, skipped (--quick)`); continue; }
     const raw = await fetchOverpass(city);
     const { buildings, maxH, count } = processCity(city, raw);
-    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, count, maxH: Math.round(maxH), data: encode(buildings) });
+    const roadsRaw = await fetchOverpass(city, 'roads');
+    const roads = processRoads(city, roadsRaw);
+    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads) });
     if (!REFETCH) continue;
     await sleep(2000); // be polite to Overpass
   }
@@ -245,7 +328,7 @@ async function main() {
   await writeFile(OUT, html);
   const size = (await stat(OUT)).size;
   log(`wrote ${OUT} (${(size / 1024 / 1024).toFixed(2)} MB)`);
-  for (const c of cities) log(`  ${c.key}: ${c.count} buildings, ${(c.data.length / 1024).toFixed(0)} KB base64`);
+  for (const c of cities) log(`  ${c.key}: ${c.count} buildings, ${(c.data.length / 1024).toFixed(0)} KB + roads ${(c.roads.length / 1024).toFixed(0)} KB base64`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

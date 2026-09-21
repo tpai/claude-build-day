@@ -4,6 +4,7 @@ attribute float aWall;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec2 vUv;
+varying vec2 vFlat;
 varying float vRand;
 varying float vHeight;
 varying float vWall;
@@ -14,6 +15,7 @@ void main() {
   vec3 fn = folded2 - folded;
   vNormal = length(fn) > 1e-5 ? normalize(fn) : normal;
   vWorld = folded;
+  vFlat = position.xz;
   vUv = uv;
   vRand = aRand;
   vHeight = aHeight;

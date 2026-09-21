@@ -141,6 +141,7 @@ function decodeCity(b64) {
   return buildings;
 }
 
+const fract = (x) => x - Math.floor(x);
 function hash01(i) {
   let x = (i * 2654435761) >>> 0;
   x ^= x >>> 15; x = (x * 2246822519) >>> 0; x ^= x >>> 13;
@@ -203,6 +204,200 @@ function buildCityGeometry(buildings) {
   return g;
 }
 
+// ---------------------------------------------------------------- roads
+// class -> [ribbon width m, sidewalk width m, car speed m/s (0 = no cars)]
+const ROAD_SPEC = [
+  [2.2, 0, 0],    // 0 footway
+  [6.0, 0, 0],    // 1 pedestrian street
+  [4.5, 0, 4],    // 2 service / alley
+  [9.0, 2.5, 7],  // 3 residential
+  [12.0, 2.8, 9], // 4 tertiary
+  [16.0, 3.0, 12],// 5 secondary
+  [20.0, 3.3, 14],// 6 primary
+  [24.0, 3.5, 18],// 7 trunk / motorway
+];
+const sidewalkOf = (cls, width) => cls < 3 ? 0 : Math.min(1.8 + 0.25 * cls, width * 0.22);
+
+function decodeRoads(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const dv = new DataView(bytes.buffer);
+  let o = 0;
+  const rd = () => { const v = dv.getInt16(o, true); o += 2; return v; };
+  const n = rd();
+  const roads = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const nv = rd();
+    const flags = rd();
+    const cls = flags & 15, oneway = (flags & 16) !== 0;
+    const pts = new Float32Array(nv * 2);
+    const nodes = new Int16Array(nv);
+    for (let j = 0; j < nv; j++) { pts[2 * j] = rd() / 2; pts[2 * j + 1] = rd() / 2; nodes[j] = rd(); }
+    const cum = new Float32Array(nv);
+    for (let j = 1; j < nv; j++) cum[j] = cum[j - 1] + Math.hypot(pts[2 * j] - pts[2 * j - 2], pts[2 * j + 1] - pts[2 * j - 1]);
+    const width = ROAD_SPEC[cls][0];
+    roads[i] = { cls, oneway, pts, nodes, cum, len: cum[nv - 1], width, sidewalk: sidewalkOf(cls, width), speed: ROAD_SPEC[cls][2] };
+  }
+  return roads;
+}
+
+// Flat ribbons along each road, mitred at the joints, subdivided so they follow the fold.
+function buildRoadGeometry(roads) {
+  const pos = [], across = [], along = [], widthA = [], clsA = [], index = [];
+  const y = 0.3;
+  // draw footways first and big roads last so that major roads sit on top at intersections
+  const order = roads.map((r, i) => i).sort((a, b) => roads[a].cls - roads[b].cls);
+  for (const ri of order) {
+    const r = roads[ri];
+    // subdivide long segments
+    const P = [], L = [];
+    const nv = r.pts.length / 2;
+    for (let i = 0; i < nv; i++) {
+      const x0 = r.pts[2 * i], z0 = r.pts[2 * i + 1];
+      if (i > 0) {
+        const xp = r.pts[2 * i - 2], zp = r.pts[2 * i - 1];
+        const seg = Math.hypot(x0 - xp, z0 - zp);
+        const k = Math.ceil(seg / 24);
+        for (let j = 1; j < k; j++) { const t = j / k; P.push([xp + (x0 - xp) * t, zp + (z0 - zp) * t]); L.push(r.cum[i - 1] + seg * t); }
+      }
+      P.push([x0, z0]); L.push(r.cum[i]);
+    }
+    const n = P.length;
+    const hw = r.width / 2;
+    const base = pos.length / 3;
+    for (let i = 0; i < n; i++) {
+      const prev = P[Math.max(i - 1, 0)], next = P[Math.min(i + 1, n - 1)], cur = P[i];
+      let d0x = cur[0] - prev[0], d0z = cur[1] - prev[1], d1x = next[0] - cur[0], d1z = next[1] - cur[1];
+      const l0 = Math.hypot(d0x, d0z) || 1, l1 = Math.hypot(d1x, d1z) || 1;
+      d0x /= l0; d0z /= l0; d1x /= l1; d1z /= l1;
+      if (i === 0) { d0x = d1x; d0z = d1z; }
+      if (i === n - 1) { d1x = d0x; d1z = d0z; }
+      // normals of the two segments and the mitre between them
+      const n0x = -d0z, n0z = d0x, n1x = -d1z, n1z = d1x;
+      let mx = n0x + n1x, mz = n0z + n1z;
+      const ml = Math.hypot(mx, mz) || 1;
+      mx /= ml; mz /= ml;
+      const scale = Math.min(1 / Math.max(mx * n0x + mz * n0z, 0.4), 2.5);
+      const ox = mx * hw * scale, oz = mz * hw * scale;
+      pos.push(cur[0] - ox, y, cur[1] - oz, cur[0] + ox, y, cur[1] + oz);
+      across.push(-1, 1); along.push(L[i], L[i]); widthA.push(r.width, r.width);
+      const c = r.cls + (r.oneway ? 16 : 0); clsA.push(c, c);
+      if (i > 0) {
+        const a = base + (i - 1) * 2;
+        index.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('aAcross', new THREE.Float32BufferAttribute(across, 1));
+  g.setAttribute('aAlong', new THREE.Float32BufferAttribute(along, 1));
+  g.setAttribute('aWidth', new THREE.Float32BufferAttribute(widthA, 1));
+  g.setAttribute('aCls', new THREE.Float32BufferAttribute(clsA, 1));
+  g.setIndex(index);
+  g.computeBoundingSphere();
+  return g;
+}
+
+// ---------------------------------------------------------------- agents (cars + pedestrians)
+// Agents follow the road graph: at every shared node they may turn onto another
+// road; at a dead end they turn back. `opts.allowed(road)` picks usable roads,
+// `opts.speed(road)` the base speed and `opts.offset(road)` the lateral offset.
+function makeAgents(roads, count, opts) {
+  const usable = [];
+  let total = 0;
+  for (let i = 0; i < roads.length; i++) if (opts.allowed(roads[i])) { usable.push(i); total += roads[i].len; }
+  const nodeMap = new Map();
+  for (const ri of usable) {
+    const r = roads[ri];
+    for (let k = 0; k < r.nodes.length; k++) if (r.nodes[k] >= 0) {
+      let list = nodeMap.get(r.nodes[k]);
+      if (!list) nodeMap.set(r.nodes[k], list = []);
+      list.push(ri, k);
+    }
+  }
+  const n = usable.length ? Math.min(count, Math.max(20, Math.round(total / opts.spacing))) : 0;
+  const road = new Int32Array(n), seg = new Int32Array(n), dir = new Int8Array(n);
+  const s = new Float32Array(n), speed = new Float32Array(n), side = new Float32Array(n), seed = new Float32Array(n);
+  const rand = Math.random;
+  const pickRoad = () => { // weighted by length
+    let x = rand() * total;
+    for (const ri of usable) { x -= roads[ri].len; if (x <= 0) return ri; }
+    return usable[usable.length - 1];
+  };
+  const enter = (i, ri, k, d) => {
+    const r = roads[ri];
+    const last = r.pts.length / 2 - 1;
+    if (r.oneway && opts.obeyOneway) d = 1;
+    if (k === last) d = -1; else if (k === 0) d = 1;
+    road[i] = ri; dir[i] = d; s[i] = r.cum[k]; seg[i] = d > 0 ? Math.min(k, last - 1) : Math.max(k - 1, 0);
+    speed[i] = opts.speed(r) * (0.75 + 0.5 * seed[i]);
+    side[i] = opts.offset(r, seed[i]);
+  };
+  for (let i = 0; i < n; i++) {
+    seed[i] = rand();
+    const ri = pickRoad();
+    const r = roads[ri];
+    const k = Math.floor(rand() * (r.pts.length / 2 - 1));
+    enter(i, ri, k, rand() < 0.5 ? 1 : -1);
+    s[i] = r.cum[k] + rand() * (r.cum[k + 1] - r.cum[k]);
+  }
+  // arrived at point k of the current road: maybe switch to another road through this node
+  const arrive = (i, k, atEnd) => {
+    const r = roads[road[i]];
+    const node = r.nodes[k];
+    const list = node >= 0 ? nodeMap.get(node) : null;
+    if (list && list.length > 2 && (atEnd || rand() < opts.turnP)) {
+      // gather candidates other than the current road (and entries that would go against a oneway)
+      const cand = [];
+      for (let j = 0; j < list.length; j += 2) {
+        const rj = list[j], kj = list[j + 1];
+        if (rj === road[i]) continue;
+        const rr = roads[rj];
+        if (opts.obeyOneway && rr.oneway && kj === rr.pts.length / 2 - 1) continue;
+        cand.push(rj, kj);
+      }
+      if (cand.length) {
+        const c = Math.floor(rand() * (cand.length / 2)) * 2;
+        enter(i, cand[c], cand[c + 1], rand() < 0.5 ? 1 : -1);
+        return;
+      }
+    }
+    if (atEnd) {
+      if (opts.obeyOneway && r.oneway) { // nowhere to go: respawn somewhere else
+        const ri = pickRoad();
+        enter(i, ri, Math.floor(rand() * (roads[ri].pts.length / 2 - 1)), 1);
+      } else {
+        dir[i] = -dir[i];
+      }
+    }
+  };
+  const step = (dt, emit) => {
+    for (let i = 0; i < n; i++) {
+      let r = roads[road[i]];
+      const last = r.pts.length / 2 - 1;
+      s[i] += dir[i] * speed[i] * dt;
+      if (dir[i] > 0) {
+        while (seg[i] < last - 1 && s[i] >= r.cum[seg[i] + 1]) { seg[i]++; arrive(i, seg[i], false); r = roads[road[i]]; if (dir[i] < 0) break; }
+        if (dir[i] > 0 && s[i] >= r.len) { s[i] = r.len; arrive(i, r.pts.length / 2 - 1, true); r = roads[road[i]]; }
+      } else {
+        while (seg[i] > 0 && s[i] <= r.cum[seg[i]]) { seg[i]--; arrive(i, seg[i] + 1, false); r = roads[road[i]]; if (dir[i] > 0) break; }
+        if (dir[i] < 0 && s[i] <= 0) { s[i] = 0; arrive(i, 0, true); r = roads[road[i]]; }
+      }
+      // position on the segment + lateral offset to the travelling side
+      const k = seg[i];
+      const x0 = r.pts[2 * k], z0 = r.pts[2 * k + 1], x1 = r.pts[2 * k + 2], z1 = r.pts[2 * k + 3];
+      const l = r.cum[k + 1] - r.cum[k] || 1;
+      const t = THREE.MathUtils.clamp((s[i] - r.cum[k]) / l, 0, 1);
+      let hx = (x1 - x0) / l * dir[i], hz = (z1 - z0) / l * dir[i];
+      const off = side[i];
+      emit(i, x0 + (x1 - x0) * t - hz * off, z0 + (z1 - z0) * t + hx * off, hx, hz, seed[i]);
+    }
+  };
+  return { n, step, seed };
+}
+
 // ---------------------------------------------------------------- scene
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 1, 12000);
@@ -224,9 +419,10 @@ const lightUniforms = {
   uFogDensity: { value: 0.0008 },
 };
 
+const LIGHT = SHADERS['lighting.glsl'];
 const buildingMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['fold.glsl'] + SHADERS['building.vert'],
-  fragmentShader: SHADERS['building.frag'],
+  fragmentShader: LIGHT + SHADERS['building.frag'],
   uniforms: {
     ...foldUniforms, ...lightUniforms,
     uBuildingTint: { value: cur.buildingTint },
@@ -240,7 +436,7 @@ scene.add(cityMesh);
 
 const groundMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['fold.glsl'] + SHADERS['ground.vert'],
-  fragmentShader: SHADERS['ground.frag'],
+  fragmentShader: LIGHT + SHADERS['ground.frag'],
   uniforms: {
     ...foldUniforms, ...lightUniforms,
     uGroundBase: { value: cur.groundBase },
@@ -253,6 +449,70 @@ const ground = new THREE.Mesh(groundGeo, groundMat);
 ground.position.y = -0.05;
 ground.frustumCulled = false;
 scene.add(ground);
+
+// streets
+const nightUniform = { value: 0 };
+const roadMat = new THREE.ShaderMaterial({
+  vertexShader: SHADERS['fold.glsl'] + SHADERS['road.vert'],
+  fragmentShader: LIGHT + SHADERS['road.frag'],
+  depthWrite: false, // ribbons overlap at junctions; the depth test against ground/buildings is enough
+  uniforms: { ...foldUniforms, ...lightUniforms, uNight: nightUniform, uWindowColor: { value: cur.windowColor } },
+});
+const roadMesh = new THREE.Mesh(new THREE.BufferGeometry(), roadMat);
+roadMesh.frustumCulled = false;
+roadMesh.renderOrder = 1;
+scene.add(roadMesh);
+
+// cars: one instanced low-poly body, matrices updated from the traffic simulation
+const MAX_CARS = 700;
+function carGeometry() {
+  const parts = [
+    new THREE.BoxGeometry(4.4, 0.9, 1.9).translate(0, 0.8, 0),     // body
+    new THREE.BoxGeometry(2.3, 0.65, 1.7).translate(-0.25, 1.55, 0), // cabin
+  ];
+  const pos = [], nrm = [];
+  for (const g of parts) {
+    const ng = g.toNonIndexed();
+    pos.push(...ng.getAttribute('position').array);
+    nrm.push(...ng.getAttribute('normal').array);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  g.scale(1.2, 1.2, 1.2);
+  return g;
+}
+const carMat = new THREE.ShaderMaterial({
+  vertexShader: SHADERS['fold.glsl'] + SHADERS['car.vert'],
+  fragmentShader: LIGHT + SHADERS['car.frag'],
+  uniforms: { ...foldUniforms, ...lightUniforms, uNight: nightUniform },
+});
+const cars = new THREE.InstancedMesh(carGeometry(), carMat, MAX_CARS);
+cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+cars.frustumCulled = false;
+cars.count = 0;
+scene.add(cars);
+const CAR_COLORS = ['#f2f2f0', '#f2f2f0', '#e9e9ea', '#1a1a1c', '#1a1a1c', '#8d9096', '#5a5d63', '#b8bcc2', '#9e1b1b', '#1f3f7a', '#2b4a3a', '#6f2a5a', '#c9772a'];
+const TAXI = { taipei: '#f4c20d', tokyo: '#151515', newyork: '#f7b500', hongkong: '#c8102e' };
+
+// pedestrians: point sprites, positions updated from the same graph walker
+const MAX_PEOPLE = 6000;
+const peopleGeo = new THREE.BufferGeometry();
+peopleGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(MAX_PEOPLE * 3), 3).setUsage(THREE.DynamicDrawUsage));
+peopleGeo.setAttribute('aSeed', new THREE.Float32BufferAttribute(new Float32Array(MAX_PEOPLE * 3), 3));
+peopleGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 3000);
+const peopleMat = new THREE.ShaderMaterial({
+  vertexShader: SHADERS['fold.glsl'] + SHADERS['people.vert'],
+  fragmentShader: SHADERS['people.frag'],
+  transparent: true, depthWrite: false,
+  uniforms: {
+    ...foldUniforms, ...lightUniforms,
+    uPixelRatio: { value: renderer.getPixelRatio() }, uViewH: { value: 1 },
+  },
+});
+const people = new THREE.Points(peopleGeo, peopleMat);
+people.frustumCulled = false;
+scene.add(people);
 
 const skyMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['sky.vert'],
@@ -319,6 +579,8 @@ function resize() {
   rt.setSize(Math.floor(w * pr), Math.floor(h * pr));
   postMat.uniforms.uAspect.value = w / h;
   partMat.uniforms.uPixelRatio.value = pr;
+  peopleMat.uniforms.uPixelRatio.value = pr;
+  peopleMat.uniforms.uViewH.value = Math.floor(h * pr);
 }
 addEventListener('resize', resize);
 resize();
@@ -332,6 +594,7 @@ const orbit = {
   dragging: false, lastX: 0, lastY: 0, pinchDist: 0,
   vTheta: 0, vPhi: 0,
 };
+for (const k of ['theta', 'phi', 'radius']) { const v = parseFloat(HASH[k]); if (Number.isFinite(v)) orbit[k] = v; } // #theta=..&phi=..&radius=.. for screenshots
 const canvas = renderer.domElement;
 const now = () => performance.now() / 1000;
 canvas.addEventListener('pointerdown', (e) => { orbit.dragging = true; orbit.lastX = e.clientX; orbit.lastY = e.clientY; orbit.lastInteraction = now(); canvas.setPointerCapture(e.pointerId); });
@@ -365,7 +628,7 @@ function updateCamera(dt, t) {
     orbit.phi += (1.12 + Math.sin(t * 0.13) * 0.08 - orbit.phi) * 0.4 * dt * resume;
   }
   orbit.phi = THREE.MathUtils.clamp(orbit.phi, 0.25, 1.48);
-  orbit.radius = THREE.MathUtils.clamp(orbit.radius, 160, 1700);
+  orbit.radius = THREE.MathUtils.clamp(orbit.radius, 60, 1700);
   const r = orbit.radius;
   camera.position.set(
     orbit.target.x + r * Math.sin(orbit.phi) * Math.sin(orbit.theta),
@@ -400,13 +663,53 @@ state.prevSeason = state.seasonIndex;
 setPalette(cur, SEASONS[state.seasonIndex]);
 
 const decodedCities = new Map();
+let traffic = null, crowd = null;
+const carDummy = new THREE.Object3D();
 function loadCity(i) {
   const c = CITY_DATA[i];
-  if (!decodedCities.has(c.key)) decodedCities.set(c.key, buildCityGeometry(decodeCity(c.data)));
-  const old = cityMesh.geometry;
-  cityMesh.geometry = decodedCities.get(c.key);
-  if (old && old !== cityMesh.geometry && !Array.from(decodedCities.values()).includes(old)) old.dispose();
+  if (!decodedCities.has(c.key)) {
+    const roads = decodeRoads(c.roads);
+    decodedCities.set(c.key, { geo: buildCityGeometry(decodeCity(c.data)), roadGeo: buildRoadGeometry(roads), roads });
+  }
+  const entry = decodedCities.get(c.key);
+  cityMesh.geometry = entry.geo;
+  roadMesh.geometry = entry.roadGeo;
   foldUniforms.uCurlR.value = Math.max(520, c.maxH + 90);
+
+  // traffic keeps to the driving side of each city; oneway roads are respected
+  const sideSign = c.driveLeft ? -1 : 1;
+  traffic = makeAgents(entry.roads, MAX_CARS, {
+    spacing: 30, turnP: 0.3, obeyOneway: true,
+    allowed: (r) => r.speed > 0,
+    speed: (r) => r.speed,
+    offset: (r, seed) => {
+      const roadHalf = r.width / 2 - r.sidewalk;
+      if (r.oneway) return (seed - 0.5) * roadHalf * 1.1; // spread across the lanes
+      return sideSign * roadHalf * (0.45 + 0.25 * seed);
+    },
+  });
+  cars.count = traffic.n;
+  const taxi = TAXI[c.key] ? new THREE.Color(TAXI[c.key]) : null;
+  for (let k = 0; k < traffic.n; k++) {
+    const col = taxi && Math.random() < 0.14 ? taxi : new THREE.Color(CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)]);
+    cars.setColorAt(k, col);
+  }
+  cars.instanceColor.needsUpdate = true;
+
+  // pedestrians use every road, on the sidewalk where there is one
+  crowd = makeAgents(entry.roads, MAX_PEOPLE, {
+    spacing: 12, turnP: 0.45, obeyOneway: false,
+    allowed: () => true,
+    speed: () => 1.4,
+    offset: (r, seed) => {
+      if (r.sidewalk > 0) return (seed < 0.5 ? -1 : 1) * (r.width / 2 - r.sidewalk * (0.25 + 0.6 * fract(seed * 7)));
+      return (seed - 0.5) * r.width * 0.7;
+    },
+  });
+  const seeds = peopleGeo.getAttribute('aSeed');
+  for (let k = 0; k < crowd.n; k++) seeds.setXYZ(k, Math.random(), Math.random(), Math.random());
+  seeds.needsUpdate = true;
+  peopleGeo.setDrawRange(0, crowd.n);
   state.cityIndex = i;
   updateTitle();
   $('#stats').textContent = I18N[lang].buildings(c.count);
@@ -516,6 +819,23 @@ function frame() {
   partMat.uniforms.uSize.value = cur.size; partMat.uniforms.uSpin.value = cur.spin;
   lightUniforms.uFogDensity.value = cur.fogDensity;
   buildingMat.uniforms.uWindowLit.value = cur.windowLit;
+  nightUniform.value = THREE.MathUtils.smoothstep(cur.windowLit, 0.25, 0.7);
+
+  // traffic + pedestrians
+  if (traffic) {
+    traffic.step(dt, (k, x, z, hx, hz) => {
+      carDummy.position.set(x, 0, z);
+      carDummy.rotation.y = Math.atan2(-hz, hx);
+      carDummy.updateMatrix();
+      cars.setMatrixAt(k, carDummy.matrix);
+    });
+    cars.instanceMatrix.needsUpdate = true;
+  }
+  if (crowd) {
+    const arr = peopleGeo.getAttribute('position').array;
+    crowd.step(dt, (k, x, z) => { arr[3 * k] = x; arr[3 * k + 1] = 0.3; arr[3 * k + 2] = z; });
+    peopleGeo.getAttribute('position').needsUpdate = true;
+  }
   postMat.uniforms.uSaturation.value = cur.saturation;
   postMat.uniforms.uVignette.value = cur.vignette;
 

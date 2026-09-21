@@ -1,6 +1,8 @@
 # 鏡像維度 · Mirror Dimension
 
-奇異博士風格的城市模擬器:真實城市的 OSM 建築足跡,在 Three.js 裡摺疊、扭轉、萬花筒化。
+奇異博士風格的城市模擬器:真實城市的 OSM 建築足跡與街道網,在 Three.js 裡摺疊、扭轉、萬花筒化。
+建築有程序化的窗戶、玻璃帷幕、店面與屋頂設備;街道有人行道、車道線、斑馬線;
+車輛沿真實路網行駛(依路口轉彎、遵守單行道與各城市的行駛方向),行人在人行道上走動。
 四個季節、五座城市、一個「鏡像強度」滑桿。整個示範是**一個完全離線的 HTML 檔**。
 
 ## 使用
@@ -25,6 +27,7 @@ mirror-dimension.html#city=tokyo&season=winter&mirror=0.6&lang=en&intro=0
 ```
 
 `city` 可以是 key(taipei / tokyo / newyork / paris / hongkong)或索引 0–4;`season` 為 spring / summer / autumn / winter;`mirror` 為 0–1;`intro=0` 跳過開場的摺疊展開動畫。
+`radius`、`phi`、`theta` 可指定初始鏡頭(距離、俯角、方位角),適合截圖。
 
 ## 重新建置
 
@@ -35,24 +38,25 @@ node build.mjs --quick     # 只用已快取的城市,產出 dist/mirror-dimensi
 ```
 
 Overpass 公開節點常常 504,腳本會在多個鏡像之間輪替重試最多 15 次;
-抓到的原始資料快取在 `data/<city>.raw.json`,刪掉該檔即可強制重抓單一城市。
+抓到的原始資料快取在 `data/<city>.raw.json`(建築)與 `data/<city>.roads.raw.json`(道路),刪掉該檔即可強制重抓單一城市。
 
 需要 Node 20 以上,建置時需要網路(Overpass API 與 jsDelivr)。產出檔在 `dist/mirror-dimension.html`。
 
-要改城市、半徑或建築上限,編輯 `build.mjs` 開頭的 `CITIES` 與常數。
+要改城市、半徑、建築或道路上限,編輯 `build.mjs` 開頭的 `CITIES`、`ROAD_CLASS` 與常數。
 
 ## 結構
 
 ```
-build.mjs            抓取 OSM、簡化幾何、打包成 int16 base64、內聯一切
+build.mjs            抓取 OSM 建築與道路、簡化幾何、打包成 int16 base64、內聯一切
 src/index.html       HTML 模板(<!--STYLE--> 與 <!--APP--> 會被取代)
 src/style.css        介面樣式
-src/main.js          主程式:解碼城市、擠出建築、季節插值、鏡頭、後製、UI
-src/shaders/         fold.glsl(共用摺疊)、building/ground/sky/particles/post
+src/main.js          主程式:解碼城市與路網、擠出建築、道路緞帶、車流/行人模擬、季節插值、鏡頭、後製、UI
+src/shaders/         fold.glsl(共用摺疊)、lighting.glsl(共用光照/霧)、
+                     building(三種立面 + 店面 + 屋頂)、road(柏油/人行道/標線)、car、people、ground、sky、particles、post
 data/                快取:*.raw.json(Overpass 原始回應)、three.module.min.js
 dist/                產出的單檔 HTML
 ```
 
 ## 資料來源
 
-建築資料 © OpenStreetMap 貢獻者,依 ODbL 授權。Three.js 依 MIT 授權。
+建築與道路資料 © OpenStreetMap 貢獻者,依 ODbL 授權。Three.js 依 MIT 授權。

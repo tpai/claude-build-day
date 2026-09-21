@@ -1,29 +1,46 @@
-[build] three.js: cached
+[build] three.js: downloading https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js
 [build] taipei: fetching from https://overpass-api.de/api/interpreter (attempt 1)
-[build] taipei: got 2699 ways
+[build] taipei: failed (HTTP 504), retrying...
+[build] taipei: fetching from https://maps.mail.ru/osm/tools/overpass/api/interpreter (attempt 2)
+[build] taipei: got 2699 building ways
 [build] taipei: 2699 ways -> 2614 valid -> 2614 kept, 16862 verts, max height 508 m (skipped open 0, small 85, far 0)
-[build] tokyo: using cached /Users/tony.p/claude-build-day/data/tokyo.raw.json
+[build] taipei: fetching from https://overpass-api.de/api/interpreter (attempt 1)
+[build] taipei: got 2296 roads ways
+[build] taipei: 2296 highway ways -> 2204 runs -> 2204 kept, 10849 pts, 197.1 km, 3171 intersections
+[build] tokyo: fetching from https://overpass-api.de/api/interpreter (attempt 1)
+[build] tokyo: got 2633 building ways
 [build] tokyo: 2633 ways -> 2466 valid -> 2466 kept, 12971 verts, max height 227 m (skipped open 0, small 167, far 0)
+[build] tokyo: using cached /Users/tony.pai/claude-build-day/data/tokyo.roads.raw.json
+[build] tokyo: 2582 highway ways -> 2043 runs -> 2043 kept, 11017 pts, 139.1 km, 2820 intersections
+[build] newyork: fetching from https://overpass-api.de/api/interpreter (attempt 1)
+[build] newyork: got 1561 building ways
+[build] newyork: 1561 ways -> 1530 valid -> 1530 kept, 8862 verts, max height 443 m (skipped open 0, small 31, far 0)
 [build] newyork: fetching from https://overpass-api.de/api/interpreter (attempt 1)
 [build] newyork: failed (HTTP 504), retrying...
 [build] newyork: fetching from https://maps.mail.ru/osm/tools/overpass/api/interpreter (attempt 2)
 [build] newyork: failed (HTTP 504), retrying...
 [build] newyork: fetching from https://overpass.openstreetmap.fr/api/interpreter (attempt 3)
-[build] newyork: got 1561 ways
-[build] newyork: 1561 ways -> 1530 valid -> 1530 kept, 8862 verts, max height 443 m (skipped open 0, small 31, far 0)
+[build] newyork: got 2468 roads ways
+[build] newyork: 2468 highway ways -> 2293 runs -> 2293 kept, 7757 pts, 126.8 km, 2708 intersections
 [build] paris: fetching from https://overpass-api.de/api/interpreter (attempt 1)
-[build] paris: failed (HTTP 504), retrying...
-[build] paris: fetching from https://maps.mail.ru/osm/tools/overpass/api/interpreter (attempt 2)
-[build] paris: failed (HTTP 504), retrying...
-[build] paris: fetching from https://overpass.openstreetmap.fr/api/interpreter (attempt 3)
-[build] paris: got 2756 ways
+[build] paris: got 2756 building ways
 [build] paris: 2756 ways -> 2430 valid -> 2430 kept, 19234 verts, max height 52 m (skipped open 0, small 326, far 0)
+[build] paris: fetching from https://overpass-api.de/api/interpreter (attempt 1)
+[build] paris: got 4443 roads ways
+[build] paris: 4443 highway ways -> 4212 runs -> 2600 kept, 9909 pts, 99.0 km, 3067 intersections
 [build] hongkong: fetching from https://overpass-api.de/api/interpreter (attempt 1)
-[build] hongkong: got 1353 ways
+[build] hongkong: failed (HTTP 504), retrying...
+[build] hongkong: fetching from https://maps.mail.ru/osm/tools/overpass/api/interpreter (attempt 2)
+[build] hongkong: got 1353 building ways
 [build] hongkong: 1353 ways -> 1314 valid -> 1314 kept, 10532 verts, max height 416 m (skipped open 0, small 39, far 0)
-[build] wrote /Users/tony.p/claude-build-day/dist/mirror-dimension.html (1.11 MB)
-[build]   taipei: 2614 buildings, 101 KB base64
-[build]   tokyo: 2466 buildings, 80 KB base64
-[build]   newyork: 1530 buildings, 54 KB base64
-[build]   paris: 2430 buildings, 113 KB base64
-[build]   hongkong: 1314 buildings, 62 KB base64
+[build] hongkong: fetching from https://overpass-api.de/api/interpreter (attempt 1)
+[build] hongkong: failed (HTTP 504), retrying...
+[build] hongkong: fetching from https://maps.mail.ru/osm/tools/overpass/api/interpreter (attempt 2)
+[build] hongkong: got 4084 roads ways
+[build] hongkong: 4084 highway ways -> 4025 runs -> 2600 kept, 11290 pts, 97.9 km, 2609 intersections
+[build] wrote /Users/tony.pai/claude-build-day/dist/mirror-dimension.html (1.57 MB)
+[build]   taipei: 2614 buildings, 101 KB + roads 96 KB base64
+[build]   tokyo: 2466 buildings, 80 KB + roads 97 KB base64
+[build]   newyork: 1530 buildings, 54 KB + roads 73 KB base64
+[build]   paris: 2430 buildings, 113 KB + roads 91 KB base64
+[build]   hongkong: 1314 buildings, 62 KB + roads 102 KB base64
