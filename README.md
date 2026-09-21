@@ -27,7 +27,7 @@
 mirror-dimension.html#city=tokyo&time=night&mirror=0.6&lang=en&intro=0
 ```
 
-`city` 可以是 key(taipei / tokyo / newyork / paris / hongkong)或索引 0–4;`time` 為 day / night(預設依目前時刻,19:00–06:00 為夜晚);`mirror` 為 0–1;`intro=0` 跳過開場的摺疊展開動畫。
+`city` 可以是 key(taipei / tokyo / newyork / paris / hongkong)或索引 0–4;`time` 為 day / night(預設白天);`mirror` 為 0–1;`intro=0` 跳過開場的摺疊展開動畫。
 `radius`、`phi`、`theta` 可指定初始鏡頭(距離、俯角、方位角),適合截圖。
 
 ## 重新建置

@@ -728,8 +728,7 @@ const state = {
   prevTime: 0, timeBlend: 1,
   panelHidden: false,
 };
-// follow the clock: night between 19:00 and 06:00
-{ const h = new Date().getHours(); state.timeIndex = h >= 19 || h < 6 ? 1 : 0; }
+// defaults: Taipei by day (timeIndex 0 = day; city index 0 = Taipei, see loadCity below)
 {
   const ti = ['day', 'night'].indexOf(HASH.time);
   if (ti >= 0) state.timeIndex = ti;
