@@ -30,6 +30,7 @@ const OUT = join(DIST, QUICK ? 'mirror-dimension-preview.html' : 'mirror-dimensi
 
 const RADIUS_M = 800;         // fetch radius around each city centre
 const MAX_BUILDINGS = 3000;   // per city, nearest to centre kept
+const BOX_FRAC = 0.7;         // main.js uses the square inscribed in the fetch circle (tileState.boxR)
 const MAX_ROADS = 2600;       // per city, major roads first, then nearest to centre
 const GROUND_M = 2600;        // ground plane size (must match main.js)
 const MASK_PX = 1024;         // water / park mask resolution over the ground plane (~2.5 m per pixel)
@@ -58,6 +59,25 @@ const ROAD_CLASS = {
   trunk: 7, trunk_link: 7, motorway: 7, motorway_link: 7,
 };
 
+// Satellite imagery: Esri World Imagery tiles, stitched into one texture per city
+// in the browser (the tiles are inlined as JPEG data URIs, so nothing is fetched at runtime).
+const SAT_ZOOM = 17;          // ~1.1 m per pixel at these latitudes
+const SAT_MARGIN_M = 40;      // cover a little beyond the square the slices are cut from
+const SAT_TILE_URL = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+
+// roof:shape -> the shape ids main.js builds geometry for
+const ROOF_SHAPES = {
+  flat: 0, many: 0,
+  gabled: 1, saltbox: 1, quadruple_saltbox: 1, gambrel: 6,
+  hipped: 2, 'half-hipped': 2, side_hipped: 2, 'half_hipped': 2,
+  pyramidal: 3, cone: 3, conical: 3,
+  skillion: 4, lean_to: 4, shed: 4,
+  dome: 5, onion: 5, sphere: 5,
+  mansard: 6,
+  round: 7, barrel: 7, arched: 7,
+};
+const SHAPE_NAMES = ['flat', 'gabled', 'hipped', 'pyramidal', 'skillion', 'dome', 'mansard', 'round'];
+
 const log = (...a) => console.log('[build]', ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const exists = (p) => stat(p).then(() => true, () => false);
@@ -85,6 +105,8 @@ async function fetchOverpass(city, kind = 'building') {
   const at = `(around:${radius},${city.lat},${city.lon})`;
   let body;
   if (kind === 'building') body = `way["building"]${at};`;
+  // Simple 3D Buildings: the parts a tall building is really made of (setbacks, podiums, spires)
+  else if (kind === 'parts') body = `(way["building:part"]${at};relation["building:part"]${at};);`;
   else if (kind === 'roads') body = `way["highway"~"^(${Object.keys(ROAD_CLASS).join('|')})$"]["area"!="yes"]${at};`;
   else { // areas: polygons and multipolygon relations for water / parks, plus the coastline
     const atA = `(around:${AREA_RADIUS_M},${city.lat},${city.lon})`;
@@ -141,21 +163,57 @@ function hashId(id) { // deterministic 0..1 from way id
   return (h >>> 0) / 4294967296;
 }
 
+const numTag = (s) => { const m = String(s).match(/-?\d+(\.\d+)?/); return m ? parseFloat(m[0]) : NaN; };
+const metres = (s) => { const v = numTag(s); return /ft|'/.test(String(s)) ? v * 0.3048 : v; };
+
 function parseHeight(tags, city, id) {
-  const num = (s) => { const m = String(s).match(/-?\d+(\.\d+)?/); return m ? parseFloat(m[0]) : NaN; };
   if (tags.height) {
-    let h = num(tags.height);
-    if (/ft|'/.test(tags.height)) h *= 0.3048;
+    const h = metres(tags.height);
     if (Number.isFinite(h) && h > 2) return Math.min(h, 800);
   }
   if (tags['building:levels']) {
-    const l = num(tags['building:levels']);
-    if (Number.isFinite(l) && l > 0) return Math.min(l * city.levelHeight + 1, 800);
+    const l = numTag(tags['building:levels']);
+    if (Number.isFinite(l) && l > 0) {
+      const roofL = numTag(tags['roof:levels']);
+      return Math.min((l + (Number.isFinite(roofL) ? roofL : 0)) * city.levelHeight + 1, 800);
+    }
   }
   const [lo, hi] = city.levels;
   const r = hashId(id);
   const skew = r * r; // bias toward lower buildings
   return (lo + (hi - lo) * skew) * city.levelHeight;
+}
+
+// The height the building starts at: a spire sitting on a tower, an upper setback, an arcade.
+function parseMinHeight(tags, city) {
+  if (tags.min_height) { const v = metres(tags.min_height); if (Number.isFinite(v) && v > 0) return Math.min(v, 780); }
+  const lv = numTag(tags['building:min_level'] ?? tags['min_level']);
+  if (Number.isFinite(lv) && lv > 0) return Math.min(lv * city.levelHeight, 780);
+  return 0;
+}
+
+// roof:shape / roof:height / roof:levels / roof:orientation / roof:direction.
+// In OSM `height` includes the roof, so the walls stop roofH short of the top.
+function parseRoof(tags, city, span) {
+  const shape = ROOF_SHAPES[tags['roof:shape']] ?? (tags['roof:shape'] ? 0 : -1);
+  if (shape < 0) return { shape: 0, roofH: 0, dir: 0 };
+  let roofH = NaN;
+  if (tags['roof:height']) roofH = metres(tags['roof:height']);
+  if (!Number.isFinite(roofH) && tags['roof:levels']) {
+    const l = numTag(tags['roof:levels']);
+    if (Number.isFinite(l)) roofH = l * city.levelHeight * 0.85;
+  }
+  if (!Number.isFinite(roofH) || roofH <= 0) {
+    // untagged pitch: a sensible rise for the shape, scaled by how wide the building is
+    const frac = [0, 0.35, 0.3, 0.5, 0.2, 0.5, 0.45, 0.3][shape];
+    roofH = shape === 0 ? 0 : Math.min(span * frac, 12);
+  }
+  // roof:direction points down the slope (skillion) or along the ridge, depending on the
+  // tag pair; roof:orientation across turns a ridge a quarter turn.
+  let dir = numTag(tags['roof:direction'] ?? tags.direction);
+  if (!Number.isFinite(dir)) dir = -1; else dir = ((dir % 360) + 360) % 360;
+  const across = tags['roof:orientation'] === 'across';
+  return { shape, roofH: Math.max(0, Math.min(roofH, 60)), dir, across };
 }
 
 function project(city) {
@@ -171,6 +229,43 @@ function signedArea(pts) {
     a += x1 * z2 - x2 * z1;
   }
   return a / 2;
+}
+
+// Smallest-area enclosing rectangle (rotating calipers over the edge directions):
+// gives the width a roof has to span and the axis its ridge runs along.
+function minRect(pts) {
+  let best = null;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const dx = b[0] - a[0], dz = b[1] - a[1];
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) continue;
+    const ux = dx / len, uz = dz / len;
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const [x, z] of pts) {
+      const u = x * ux + z * uz, v = -x * uz + z * ux;
+      if (u < minU) minU = u; if (u > maxU) maxU = u;
+      if (v < minV) minV = v; if (v > maxV) maxV = v;
+    }
+    const w = maxU - minU, h = maxV - minV;
+    if (!best || w * h < best.area) best = { area: w * h, ux, uz, along: w, across: h };
+  }
+  if (!best) return { span: 1, acrossDir: 0 };
+  // the ridge runs along the longer side; what gets stored is the bearing across it
+  const long = best.along >= best.across;
+  const rx = long ? best.ux : -best.uz, rz = long ? best.uz : best.ux;
+  return { span: Math.min(best.along, best.across), acrossDir: bearingOf(-rz, rx) };
+}
+// compass bearing (0 = north = -z, 90 = east = +x) of a direction in city metres
+const bearingOf = (x, z) => ((Math.atan2(x, -z) * 180) / Math.PI + 360) % 360;
+
+function pointInPoly(x, z, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, zi] = pts[i], [xj, zj] = pts[j];
+    if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
 }
 
 function perpDist(p, a, b) {
@@ -198,44 +293,87 @@ function simplify(pts, tol) {
   return pts;
 }
 
-function processCity(city, raw) {
+// One closed way (a building or a building:part) -> a solid with a roof, or null.
+function readSolid(el, city, proj, clamp, stats) {
+  const g = el.geometry;
+  if (!g || g.length < 4) return null;
+  if (g[0].lat !== g[g.length - 1].lat || g[0].lon !== g[g.length - 1].lon) { stats.open++; return null; }
+  let pts = g.slice(0, -1).map((n) => proj(n.lat, n.lon));
+  if (pts.some(([x, z]) => Math.abs(x) > clamp || Math.abs(z) > clamp)) { stats.far++; return null; }
+  const area = Math.abs(signedArea(pts));
+  if (area < MIN_AREA_M2) { stats.small++; return null; }
+  pts = simplify(pts, SIMPLIFY_TOL_M);
+  if (pts.length < 3) { stats.small++; return null; }
+  if (signedArea(pts) < 0) pts.reverse(); // enforce consistent winding
+  const tags = el.tags || {};
+  const rect = minRect(pts);
+  const roof = parseRoof(tags, city, rect.span);
+  let dir = roof.dir < 0 ? rect.acrossDir : roof.dir;
+  // a tagged ridge direction is given along the ridge, so the across direction is a quarter turn off
+  if (roof.dir >= 0 && roof.shape !== 4) dir = (dir + 90) % 360;
+  if (roof.across) dir = (dir + 90) % 360;
+  const h = parseHeight(tags, city, el.id);
+  const minH = Math.min(parseMinHeight(tags, city), h - 2);
+  const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+  const cz = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  return {
+    h, minH: Math.max(0, minH), pts, cx, cz, d: Math.hypot(cx, cz), area,
+    shape: roof.shape, roofH: Math.min(roof.roofH, (h - minH) * 0.75), dir: Math.round(dir),
+  };
+}
+
+function processCity(city, raw, partsRaw) {
   const proj = project(city);
+  const clamp = (city.radius ?? RADIUS_M) * 1.25;
+  const stats = { open: 0, small: 0, far: 0 };
   const out = [];
-  let skippedOpen = 0, skippedSmall = 0, skippedFar = 0;
   for (const el of raw.elements) {
-    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) continue;
-    const g = el.geometry;
-    if (g[0].lat !== g[g.length - 1].lat || g[0].lon !== g[g.length - 1].lon) { skippedOpen++; continue; }
-    let pts = g.slice(0, -1).map((n) => proj(n.lat, n.lon));
-    const clamp = (city.radius ?? RADIUS_M) * 1.25;
-    if (pts.some(([x, z]) => Math.abs(x) > clamp || Math.abs(z) > clamp)) { skippedFar++; continue; }
-    const area = Math.abs(signedArea(pts));
-    if (area < MIN_AREA_M2) { skippedSmall++; continue; }
-    pts = simplify(pts, SIMPLIFY_TOL_M);
-    if (pts.length < 3) { skippedSmall++; continue; }
-    if (signedArea(pts) < 0) pts.reverse(); // enforce consistent winding
-    const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
-    const cz = pts.reduce((s, p) => s + p[1], 0) / pts.length;
-    out.push({ h: parseHeight(el.tags || {}, city, el.id), pts, d: Math.hypot(cx, cz), area });
+    if (el.type !== 'way') continue;
+    const s = readSolid(el, city, proj, clamp, stats);
+    if (s) out.push(s);
+  }
+  // building:part overrides the building it sits in: the parts carry the real massing
+  // (podium, setbacks, spire), so the plain box around them is dropped.
+  const parts = [];
+  for (const el of partsRaw?.elements || []) {
+    const geoms = el.type === 'way' ? [el.geometry]
+      : (el.members || []).filter((m) => m.type === 'way' && m.geometry && m.role !== 'inner').map((m) => m.geometry);
+    for (const geometry of geoms) {
+      const s = readSolid({ ...el, geometry }, city, proj, clamp, stats);
+      if (s) parts.push(s);
+    }
+  }
+  let replaced = 0;
+  if (parts.length) {
+    const outlines = out.filter((b) => parts.some((p) => pointInPoly(p.cx, p.cz, b.pts)));
+    const drop = new Set(outlines);
+    replaced = drop.size;
+    for (let i = out.length - 1; i >= 0; i--) if (drop.has(out[i])) out.splice(i, 1);
+    out.push(...parts);
   }
   out.sort((a, b) => a.d - b.d);
   const kept = out.slice(0, MAX_BUILDINGS);
   const maxH = kept.reduce((m, b) => Math.max(m, b.h), 0);
   const verts = kept.reduce((s, b) => s + b.pts.length, 0);
-  log(`${city.key}: ${raw.elements.length} ways -> ${out.length} valid -> ${kept.length} kept, ${verts} verts, max height ${maxH.toFixed(0)} m (skipped open ${skippedOpen}, small ${skippedSmall}, far ${skippedFar})`);
+  const shapes = kept.reduce((m, b) => (b.shape ? (m[SHAPE_NAMES[b.shape]] = (m[SHAPE_NAMES[b.shape]] || 0) + 1, m) : m), {});
+  const lifted = kept.filter((b) => b.minH > 0).length;
+  log(`${city.key}: ${raw.elements.length} ways -> ${kept.length} kept, ${verts} verts, max height ${maxH.toFixed(0)} m (skipped open ${stats.open}, small ${stats.small}, far ${stats.far})`);
+  log(`${city.key}: ${parts.length} building parts replacing ${replaced} outlines, ${lifted} raised off the ground, roofs ${JSON.stringify(shapes)}`);
   return { buildings: kept, maxH, count: kept.length };
 }
 
-// Binary layout (little-endian int16): [N] then per building [nVerts, height*2, x*2, z*2, ...]
+// Binary layout (little-endian int16): [N] then per building
+// [nVerts, height*2, minHeight*2, roofHeight*2, shape | direction << 4, (x*2, z*2) * nVerts]
 function encode(buildings) {
   let n = 1;
-  for (const b of buildings) n += 2 + b.pts.length * 2;
+  for (const b of buildings) n += 5 + b.pts.length * 2;
   const buf = Buffer.alloc(n * 2);
   let o = 0;
   const w = (v) => { buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), o); o += 2; };
   w(buildings.length);
   for (const b of buildings) {
-    w(b.pts.length); w(b.h * 2);
+    w(b.pts.length); w(b.h * 2); w(b.minH * 2); w(b.roofH * 2);
+    w((b.shape & 7) | (Math.min(359, Math.max(0, b.dir)) << 4));
     for (const [x, z] of b.pts) { w(x * 2); w(z * 2); }
   }
   return buf.toString('base64');
@@ -422,6 +560,64 @@ function processAreas(city, raw) {
   return png.toString('base64');
 }
 
+// ---------------------------------------------------------------- satellite imagery
+// Esri World Imagery, slippy-map tiles. The tiles are kept whole and inlined as JPEG
+// data URIs; the browser stitches them onto one canvas, so the build needs no image
+// decoder and the page still opens offline.
+const lonOfTileX = (x, z) => (x / 2 ** z) * 360 - 180;
+const latOfTileY = (y, z) => {
+  const n = Math.PI - (2 * Math.PI * y) / 2 ** z;
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+};
+const tileXOfLon = (lon, z) => ((lon + 180) / 360) * 2 ** z;
+const tileYOfLat = (lat, z) => {
+  const r = (lat * Math.PI) / 180;
+  return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * 2 ** z;
+};
+
+async function fetchSatellite(city) {
+  const proj = project(city);
+  const reach = Math.round((city.radius ?? RADIUS_M) * BOX_FRAC) + SAT_MARGIN_M;
+  // city metres -> degrees, the inverse of project()
+  const dLon = reach / (Math.cos((city.lat * Math.PI) / 180) * 111_320);
+  const dLat = reach / 110_540;
+  const z = SAT_ZOOM;
+  const x0 = Math.floor(tileXOfLon(city.lon - dLon, z)), x1 = Math.ceil(tileXOfLon(city.lon + dLon, z));
+  const y0 = Math.floor(tileYOfLat(city.lat + dLat, z)), y1 = Math.ceil(tileYOfLat(city.lat - dLat, z));
+  const nx = x1 - x0, ny = y1 - y0;
+  const dir = join(DATA, 'tiles');
+  await mkdir(dir, { recursive: true });
+  const tiles = [];
+  let bytes = 0, fetched = 0;
+  for (let ty = y0; ty < y1; ty++) {
+    for (let tx = x0; tx < x1; tx++) {
+      const p = join(dir, `${z}-${tx}-${ty}.jpg`);
+      let buf;
+      if (!REFETCH && await exists(p)) buf = await readFile(p);
+      else {
+        let lastErr;
+        for (let attempt = 0; attempt < 4 && !buf; attempt++) {
+          try {
+            const res = await fetch(SAT_TILE_URL(z, tx, ty), { signal: AbortSignal.timeout(30_000) });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            buf = Buffer.from(await res.arrayBuffer());
+          } catch (e) { lastErr = e; await sleep(800 * (attempt + 1)); }
+        }
+        if (!buf) throw new Error(`imagery tile ${z}/${tx}/${ty} failed: ${lastErr?.message}`);
+        await writeFile(p, buf);
+        fetched++;
+      }
+      bytes += buf.length;
+      tiles.push(buf.toString('base64'));
+    }
+  }
+  // the rect the stitched canvas covers, in city metres, for the shader's uv
+  const [west, north] = proj(latOfTileY(y0, z), lonOfTileX(x0, z));
+  const [east, south] = proj(latOfTileY(y1, z), lonOfTileX(x1, z));
+  log(`${city.key}: imagery z${z} ${nx}x${ny} tiles (${fetched} fetched, ${(bytes / 1024).toFixed(0)} KB) covering ${(east - west).toFixed(0)} x ${(south - north).toFixed(0)} m`);
+  return { nx, ny, west, north, east, south, tiles };
+}
+
 const CRC_TABLE = new Int32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c; });
 function crc32(buf) { let c = -1; for (const b of buf) c = CRC_TABLE[(c ^ b) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; }
 function encodePng(w, h, rgb) {
@@ -442,7 +638,7 @@ function encodePng(w, h, rgb) {
 const escapeForScript = (s) => s.replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
 
 async function readShaders() {
-  const names = ['fold.glsl', 'lighting.glsl', 'building.vert', 'building.frag', 'ground.vert', 'ground.frag', 'road.vert', 'road.frag', 'car.vert', 'car.frag', 'tree.vert', 'tree.frag', 'people.vert', 'people.frag', 'sky.vert', 'sky.frag', 'particles.vert', 'particles.frag', 'post.vert', 'post.frag'];
+  const names = ['fold.glsl', 'lighting.glsl', 'satellite.glsl', 'building.vert', 'building.frag', 'ground.vert', 'ground.frag', 'road.vert', 'road.frag', 'car.vert', 'car.frag', 'tree.vert', 'tree.frag', 'people.vert', 'people.frag', 'sky.vert', 'sky.frag', 'particles.vert', 'particles.frag', 'post.vert', 'post.frag'];
   const shaders = {};
   for (const n of names) shaders[n] = await readFile(join(SRC, 'shaders', n), 'utf8');
   return shaders;
@@ -458,12 +654,14 @@ async function main() {
   for (const city of CITIES) {
     if (QUICK && !(await exists(join(DATA, `${city.key}.raw.json`)) && await exists(join(DATA, `${city.key}.roads.raw.json`)) && await exists(join(DATA, `${city.key}.areas.raw.json`)))) { log(`${city.key}: not cached, skipped (--quick)`); continue; }
     const raw = await fetchOverpass(city);
-    const { buildings, maxH, count } = processCity(city, raw);
+    const partsRaw = await fetchOverpass(city, 'parts');
+    const { buildings, maxH, count } = processCity(city, raw, partsRaw);
     const roadsRaw = await fetchOverpass(city, 'roads');
     const roads = processRoads(city, roadsRaw);
     const areasRaw = await fetchOverpass(city, 'areas');
     const areas = processAreas(city, areasRaw);
-    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, radius: city.radius ?? RADIUS_M, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads), areas });
+    const sat = await fetchSatellite(city);
+    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, radius: city.radius ?? RADIUS_M, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads), areas, sat });
     if (!REFETCH) continue;
     await sleep(2000); // be polite to Overpass
   }
@@ -489,7 +687,10 @@ async function main() {
   await writeFile(OUT, html);
   const size = (await stat(OUT)).size;
   log(`wrote ${OUT} (${(size / 1024 / 1024).toFixed(2)} MB)`);
-  for (const c of cities) log(`  ${c.key}: ${c.count} buildings, ${(c.data.length / 1024).toFixed(0)} KB + roads ${(c.roads.length / 1024).toFixed(0)} KB + areas ${(c.areas.length / 1024).toFixed(0)} KB base64`);
+  for (const c of cities) {
+    const sat = c.sat.tiles.reduce((s, t) => s + t.length, 0);
+    log(`  ${c.key}: ${c.count} buildings, ${(c.data.length / 1024).toFixed(0)} KB + roads ${(c.roads.length / 1024).toFixed(0)} KB + areas ${(c.areas.length / 1024).toFixed(0)} KB + imagery ${(sat / 1024).toFixed(0)} KB base64`);
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

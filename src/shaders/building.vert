@@ -1,7 +1,9 @@
 attribute float aRand;
 attribute float aHeight;
 attribute float aWall;
+attribute vec2 aCity;   // roofs: city coordinates; walls: the centroid of the roof above them
 attribute vec4 aTile;
+varying vec2 vCity;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec2 vUv;
@@ -22,6 +24,7 @@ void main() {
   vNormal = length(fn) > 1e-5 ? normalize(fn) : normal;
   vWorld = folded;
   vFlat = position.xz;
+  vCity = aCity;
   vUv = vec2(uv.x, uv.y * hs);
   vRand = aRand;
   vHeight = aHeight * hs;

@@ -9,19 +9,21 @@ const loadingText = $('#loadingText');
 // ---------------------------------------------------------------- i18n
 const I18N = {
   zh: {
-    city: '城市', time: '時段', fold: '切面',
-    hint: '拖曳環視 · 滾輪調視角 · 1–5 切城市 · Q/W 切日夜 · A–G 切切面 · H 隱藏面板',
+    city: '城市', time: '時段', fold: '切面', sat: '空拍',
+    hint: '拖曳環視 · 滾輪調視角 · 1–5 切城市 · Q/W 切日夜 · A–G 切切面 · T 切空拍 · H 隱藏面板',
     folds: ['∥ 平行', '△ 三角', '□ 四角', '⬠ 五角', '⬡ 六角'],
-    lang: 'EN', attribution: '© OpenStreetMap 貢獻者',
+    sats: ['關', '開'],
+    lang: 'EN', attribution: '© OpenStreetMap 貢獻者 · 空拍影像 Esri、Maxar、Earthstar Geographics',
     times: ['白天', '夜晚'],
     buildings: (n) => `${n} 棟建築`,
     loading: '正在展開城市…',
   },
   en: {
-    city: 'City', time: 'Time', fold: 'Faces',
-    hint: 'Drag to look around · Scroll for field of view · 1–5 cities · Q/W day/night · A–G faces · H hides panel',
+    city: 'City', time: 'Time', fold: 'Faces', sat: 'Imagery',
+    hint: 'Drag to look around · Scroll for field of view · 1–5 cities · Q/W day/night · A–G faces · T imagery · H hides panel',
     folds: ['∥ Parallel', '△ Triangle', '□ Square', '⬠ Pentagon', '⬡ Hexagon'],
-    lang: '繁中', attribution: '© OpenStreetMap contributors',
+    sats: ['Off', 'On'],
+    lang: '繁中', attribution: '© OpenStreetMap contributors · Imagery: Esri, Maxar, Earthstar Geographics',
     times: ['Day', 'Night'],
     buildings: (n) => `${n} buildings`,
     loading: 'Unfolding the city…',
@@ -128,9 +130,12 @@ function decodeCity(b64) {
   for (let i = 0; i < n; i++) {
     const nv = rd();
     const h = rd() / 2;
+    const minH = rd() / 2;
+    const roofH = rd() / 2;
+    const packed = rd();
     const pts = new Float32Array(nv * 2);
     for (let j = 0; j < nv * 2; j++) pts[j] = rd() / 2;
-    buildings[i] = { h, pts };
+    buildings[i] = { h, minH, roofH, shape: packed & 7, dir: packed >> 4, pts };
   }
   return buildings;
 }
@@ -142,10 +147,182 @@ function hash01(i) {
   return x / 4294967296;
 }
 
-function buildCityGeometry(buildings) {
-  const pos = [], nrm = [], uv = [], rnd = [], hgt = [], wall = [];
+// ---------------------------------------------------------------- roof shapes
+// OSM roof:shape ids, as packed by build.mjs. A roof occupies the top roofH metres of
+// the building (OSM heights include the roof), and every builder returns the ring the
+// walls rise to, so a gable end closes itself with no separate wall geometry.
+const ROOF = { FLAT: 0, GABLED: 1, HIPPED: 2, PYRAMIDAL: 3, SKILLION: 4, DOME: 5, MANSARD: 6, ROUND: 7 };
+
+function ringArea(r) {
+  let a = 0;
+  for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; }
+  return a / 2;
+}
+function ringCentroid(r) {
+  let a = 0, cx = 0, cz = 0;
+  for (let i = 0; i < r.length; i++) {
+    const p = r[i], q = r[(i + 1) % r.length];
+    const f = p[0] * q[1] - q[0] * p[1];
+    a += f; cx += (p[0] + q[0]) * f; cz += (p[1] + q[1]) * f;
+  }
+  if (Math.abs(a) < 1e-6) return [r.reduce((s, p) => s + p[0], 0) / r.length, r.reduce((s, p) => s + p[1], 0) / r.length];
+  return [cx / (3 * a), cz / (3 * a)];
+}
+// Mitered inward offset: every edge moves d towards the inside. Pushed far enough this
+// collapses a long rectangle onto its ridge, which is exactly what a hip roof needs.
+function insetRing(ring, d) {
+  const n = ring.length, out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = ring[i], a = ring[(i - 1 + n) % n], b = ring[(i + 1) % n];
+    const e1x = p[0] - a[0], e1z = p[1] - a[1], e2x = b[0] - p[0], e2z = b[1] - p[1];
+    const l1 = Math.hypot(e1x, e1z) || 1, l2 = Math.hypot(e2x, e2z) || 1;
+    const n1x = -e1z / l1, n1z = e1x / l1, n2x = -e2z / l2, n2z = e2x / l2; // inward normals
+    const k = 1 + n1x * n2x + n1z * n2z;
+    if (k < 0.12) return null; // a near reversal makes the miter shoot off to infinity
+    out[i] = [p[0] + (d * (n1x + n2x)) / k, p[1] + (d * (n1z + n2z)) / k];
+  }
+  const a0 = ringArea(ring), a1 = ringArea(out);
+  if (a1 < 0 || a1 > a0) return null; // collapsed through itself
+  return out;
+}
+// Sutherland-Hodgman clip to the slab lo <= u(p) <= hi
+function clipRing(ring, u, lo, hi) {
+  let poly = ring;
+  for (const [s, limit] of [[1, hi], [-1, -lo]]) {
+    const out = [];
+    for (let i = 0; i < poly.length; i++) {
+      const A = poly[i], B = poly[(i + 1) % poly.length];
+      const da = s * u(A) - limit, db = s * u(B) - limit;
+      if (da <= 0) out.push(A);
+      if ((da < 0 && db > 0) || (da > 0 && db < 0)) {
+        const t = da / (da - db);
+        out.push([A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t]);
+      }
+    }
+    poly = out;
+    if (poly.length < 3) return null;
+  }
+  return poly;
+}
+function triangulateRing(ring) {
+  const contour = ring.map((p) => new THREE.Vector2(p[0], p[1]));
+  try { return THREE.ShapeUtils.triangulateShape(contour, []).map((f) => f.map((i) => ring[i])); } catch (_) { return []; }
+}
+
+// Build one roof. `emit(p0, p1, p2)` takes [x, y, z] triples; the return value is the
+// ring (x, z, y) the walls have to reach, which for a gable rises with the slope.
+function buildRoof(ring, shape, wallTop, roofH, dir, emit) {
+  const flat = (r, y) => { for (const f of triangulateRing(r)) emit([f[0][0], y, f[0][1]], [f[1][0], y, f[1][1]], [f[2][0], y, f[2][1]]); };
+  const level = (y) => ring.map((p) => [p[0], p[1], y]);
+  if (shape === ROOF.FLAT || roofH < 0.2) { flat(ring, wallTop + roofH); return level(wallTop + roofH); }
+
+  const [cx, cz] = ringCentroid(ring);
+  const ax = Math.sin(dir), az = -Math.cos(dir); // across the ridge / down the slope
+  const u = (p) => (p[0] - cx) * ax + (p[1] - cz) * az;
+  let uMin = Infinity, uMax = -Infinity;
+  for (const p of ring) { const v = u(p); if (v < uMin) uMin = v; if (v > uMax) uMax = v; }
+  const halfW = Math.max(0.5, Math.max(-uMin, uMax));
+
+  // a ring of quads from one outline to a smaller one above it
+  const skirt = (lo, loY, hi, hiY) => {
+    for (let i = 0; i < lo.length; i++) {
+      const j = (i + 1) % lo.length;
+      const a = [lo[i][0], loY, lo[i][1]], b = [lo[j][0], loY, lo[j][1]];
+      const c = [hi[j][0], hiY, hi[j][1]], d = [hi[i][0], hiY, hi[i][1]];
+      emit(a, b, c); emit(a, c, d);
+    }
+  };
+
+  if (shape === ROOF.SKILLION) {
+    // one tilted plane: linear in u, so the triangulated footprint stays exactly planar
+    const y = (p) => wallTop + roofH * (1 - (u(p) - uMin) / (uMax - uMin || 1));
+    for (const f of triangulateRing(ring)) emit(...f.map((p) => [p[0], y(p), p[1]]));
+    return ring.map((p) => [p[0], p[1], y(p)]);
+  }
+
+  if (shape === ROOF.GABLED || shape === ROOF.ROUND) {
+    // a tent folded along the ridge: gabled is straight, round follows a barrel profile
+    const segs = shape === ROOF.ROUND ? 4 : 1;
+    const prof = shape === ROOF.ROUND ? (t) => Math.sqrt(Math.max(0, 1 - t * t)) : (t) => 1 - t;
+    const y = (p) => wallTop + roofH * prof(Math.min(1, Math.abs(u(p)) / halfW));
+    for (let s = -segs; s < segs; s++) {
+      const lo = (s / segs) * halfW, hi = ((s + 1) / segs) * halfW;
+      const strip = clipRing(ring, u, lo, hi);
+      if (!strip) continue;
+      for (const f of triangulateRing(strip)) emit(...f.map((p) => [p[0], y(p), p[1]]));
+    }
+    // the walls follow the same fold, so the ridge crossings become ring vertices
+    const out = [];
+    for (let i = 0; i < ring.length; i++) {
+      const A = ring[i], B = ring[(i + 1) % ring.length];
+      out.push([A[0], A[1], y(A)]);
+      const ua = u(A), ub = u(B);
+      if ((ua < 0) !== (ub < 0)) {
+        const t = ua / (ua - ub);
+        const p = [A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t];
+        out.push([p[0], p[1], y(p)]);
+      }
+    }
+    return out;
+  }
+
+  if (shape === ROOF.PYRAMIDAL || shape === ROOF.DOME) {
+    if (shape === ROOF.DOME) {
+      // rings shrunk towards the centre along a quarter circle
+      const S = 5;
+      let prev = ring, prevY = wallTop;
+      for (let s = 1; s <= S; s++) {
+        const t = (s / S) * (Math.PI / 2);
+        const k = Math.cos(t), y = wallTop + roofH * Math.sin(t);
+        const next = s === S ? null : ring.map((p) => [cx + (p[0] - cx) * k, cz + (p[1] - cz) * k]);
+        if (next) { skirt(prev, prevY, next, y); prev = next; prevY = y; }
+        else for (let i = 0; i < prev.length; i++) emit([prev[i][0], prevY, prev[i][1]], [prev[(i + 1) % prev.length][0], prevY, prev[(i + 1) % prev.length][1]], [cx, wallTop + roofH, cz]);
+      }
+    } else {
+      for (let i = 0; i < ring.length; i++) {
+        const j = (i + 1) % ring.length;
+        emit([ring[i][0], wallTop, ring[i][1]], [ring[j][0], wallTop, ring[j][1]], [cx, wallTop + roofH, cz]);
+      }
+    }
+    return level(wallTop);
+  }
+
+  if (shape === ROOF.MANSARD) {
+    // steep lower slope up to a break, then a shallow top
+    const d1 = Math.min(halfW * 0.35, roofH * 0.9);
+    const ring1 = insetRing(ring, d1);
+    if (ring1) {
+      const y1 = wallTop + roofH * 0.72;
+      skirt(ring, wallTop, ring1, y1);
+      const ring2 = insetRing(ring1, Math.min(halfW * 0.45, roofH * 1.2));
+      if (ring2) { skirt(ring1, y1, ring2, wallTop + roofH); flat(ring2, wallTop + roofH); }
+      else flat(ring1, y1);
+      return level(wallTop);
+    }
+    flat(ring, wallTop + roofH);
+    return level(wallTop + roofH);
+  }
+
+  // hipped: push the outline in until it collapses onto the ridge
+  const top = insetRing(ring, halfW * 0.92);
+  if (top) {
+    skirt(ring, wallTop, top, wallTop + roofH);
+    if (ringArea(top) > 0.5) flat(top, wallTop + roofH);
+    return level(wallTop);
+  }
+  for (let i = 0; i < ring.length; i++) {
+    const j = (i + 1) % ring.length;
+    emit([ring[i][0], wallTop, ring[i][1]], [ring[j][0], wallTop, ring[j][1]], [cx, wallTop + roofH, cz]);
+  }
+  return level(wallTop);
+}
+
+// `rot` is the quarter turn this slice was taken at: the city coordinates travel with
+// the geometry so the satellite imagery lands on the same roofs it was shot from.
+function buildCityGeometry(buildings, rot = 0) {
+  const pos = [], nrm = [], uv = [], rnd = [], hgt = [], wall = [], cityXZ = [];
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), ab = new THREE.Vector3(), ac = new THREE.Vector3(), fn = new THREE.Vector3();
-  const tri = (p0, p1, p2, n, uvs, r, h, w) => {
+  const tri = (p0, p1, p2, n, uvs, r, h, w, cityAt) => {
     a.set(...p0); b.set(...p1); c.set(...p2);
     ab.subVectors(b, a); ac.subVectors(c, a); fn.crossVectors(ab, ac);
     let P = [p0, p1, p2], U = uvs;
@@ -155,36 +332,61 @@ function buildCityGeometry(buildings) {
       nrm.push(n.x, n.y, n.z);
       uv.push(U[i][0], U[i][1]);
       rnd.push(r); hgt.push(h); wall.push(w);
+      const cp = cityAt(P[i]);
+      cityXZ.push(cp[0], cp[1]);
     }
   };
-  const up = new THREE.Vector3(0, 1, 0);
-  const n = new THREE.Vector3();
+  const n = new THREE.Vector3(), fnorm = new THREE.Vector3();
+  const cityAt = (p) => [unturnX(rot, p[0], p[2]), unturnZ(rot, p[0], p[2])];
   for (let bi = 0; bi < buildings.length; bi++) {
     const { h, pts } = buildings[bi];
+    const minH = buildings[bi].minH || 0;
+    const roofH = Math.min(buildings[bi].roofH || 0, (h - minH) * 0.75);
+    const shape = buildings[bi].shape || 0;
+    const wallTop = h - roofH;
     const nv = pts.length / 2;
     const r = hash01(bi + 1);
+    const ring = [];
+    for (let i = 0; i < nv; i++) ring.push([pts[2 * i], pts[2 * i + 1]]);
+    const cent = ringCentroid(ring);
+    const centCity = cityAt([cent[0], 0, cent[1]]);
+    const atCentre = () => centCity; // walls take their satellite tint from the roof above them
+
+    // roof first: it hands back the height the walls have to rise to at each corner
+    const pitched = shape !== ROOF.FLAT && roofH >= 0.2;
+    const dirRad = ((buildings[bi].dir || 0) * Math.PI) / 180;
+    // roof uv runs along the ridge and up from the eaves, so tiles lie in courses
+    const rx = Math.cos(dirRad), rz = Math.sin(dirRad);
+    const roofUv = (p) => [p[0] * rx + p[2] * rz, p[1] - wallTop];
+    const emit = (p0, p1, p2) => {
+      ab.set(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+      ac.set(p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]);
+      fnorm.crossVectors(ab, ac);
+      if (fnorm.lengthSq() < 1e-12) return;
+      fnorm.normalize();
+      if (fnorm.y < 0) fnorm.negate(); // roofs always face the sky
+      tri(p0, p1, p2, fnorm, [roofUv(p0), roofUv(p1), roofUv(p2)], r, wallTop, pitched ? 2 : 0, cityAt);
+    };
+    const top = buildRoof(ring, shape, wallTop, roofH, dirRad, emit);
+
+    // walls, from the ground (or the setback this part starts at) up to the roof's edge
     let along = 0;
-    for (let i = 0; i < nv; i++) {
-      const x0 = pts[2 * i], z0 = pts[2 * i + 1];
-      const x1 = pts[(2 * i + 2) % (nv * 2)], z1 = pts[(2 * i + 3) % (nv * 2)];
-      const dx = x1 - x0, dz = z1 - z0;
+    for (let i = 0; i < top.length; i++) {
+      const A = top[i], B = top[(i + 1) % top.length];
+      const dx = B[0] - A[0], dz = B[1] - A[1];
       const len = Math.hypot(dx, dz);
       if (len < 1e-4) continue;
       n.set(dz / len, 0, -dx / len); // outward for positive signed area in (x,z)
-      const p0 = [x0, 0, z0], p1 = [x1, 0, z1], p2 = [x1, h, z1], p3 = [x0, h, z0];
+      const p0 = [A[0], minH, A[1]], p1 = [B[0], minH, B[1]], p2 = [B[0], B[2], B[1]], p3 = [A[0], A[2], A[1]];
       const u0 = along, u1 = along + len;
-      tri(p0, p1, p2, n, [[u0, 0], [u1, 0], [u1, h]], r, h, 1);
-      tri(p0, p2, p3, n, [[u0, 0], [u1, h], [u0, h]], r, h, 1);
+      tri(p0, p1, p2, n, [[u0, minH], [u1, minH], [u1, B[2]]], r, wallTop, 1, atCentre);
+      tri(p0, p2, p3, n, [[u0, minH], [u1, B[2]], [u0, A[2]]], r, wallTop, 1, atCentre);
       along += len;
     }
-    // roof
-    const contour = [];
-    for (let i = 0; i < nv; i++) contour.push(new THREE.Vector2(pts[2 * i], pts[2 * i + 1]));
-    let faces = [];
-    try { faces = THREE.ShapeUtils.triangulateShape(contour, []); } catch (_) { faces = []; }
-    for (const f of faces) {
-      const P = f.map((idx) => [contour[idx].x, h, contour[idx].y]);
-      tri(P[0], P[1], P[2], up, P.map((p) => [p[0], p[2]]), r, h, 0);
+    // a part that starts above the ground needs a floor, or you see straight up into it
+    if (minH > 0.5) {
+      const down = new THREE.Vector3(0, -1, 0);
+      for (const f of triangulateRing(ring)) tri([f[0][0], minH, f[0][1]], [f[1][0], minH, f[1][1]], [f[2][0], minH, f[2][1]], down, f.map((p) => [p[0], p[1]]), r, wallTop, 0, cityAt);
     }
   }
   const g = new THREE.BufferGeometry();
@@ -194,6 +396,7 @@ function buildCityGeometry(buildings) {
   g.setAttribute('aRand', new THREE.Float32BufferAttribute(rnd, 1));
   g.setAttribute('aHeight', new THREE.Float32BufferAttribute(hgt, 1));
   g.setAttribute('aWall', new THREE.Float32BufferAttribute(wall, 1));
+  g.setAttribute('aCity', new THREE.Float32BufferAttribute(cityXZ, 2));
   g.computeBoundingSphere();
   return g;
 }
@@ -418,6 +621,32 @@ function loadMask(b64) {
   });
 }
 
+// ---------------------------------------------------------------- satellite imagery
+// The build inlines the raw Esri World Imagery tiles; the browser decodes them and
+// stitches them onto one canvas, which saves shipping a re-encoded mosaic.
+const SAT_TILE_PX = 256;
+function loadSatellite(sat) {
+  const load = (b64) => new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = rej;
+    im.src = 'data:image/jpeg;base64,' + b64;
+  });
+  return Promise.all(sat.tiles.map(load)).then((imgs) => {
+    const cv = document.createElement('canvas');
+    cv.width = sat.nx * SAT_TILE_PX; cv.height = sat.ny * SAT_TILE_PX;
+    const ctx = cv.getContext('2d');
+    imgs.forEach((im, i) => ctx.drawImage(im, (i % sat.nx) * SAT_TILE_PX, Math.floor(i / sat.nx) * SAT_TILE_PX, SAT_TILE_PX, SAT_TILE_PX));
+    const tex = new THREE.CanvasTexture(cv);
+    tex.flipY = false; // row 0 is north, matching the city coordinates the shader samples with
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    tex.needsUpdate = true;
+    return { tex, rect: new THREE.Vector4(sat.west, sat.north, sat.east - sat.west, sat.south - sat.north) };
+  });
+}
+
 // Scatter trees on the park mask: jittered grid, kept where the green channel is set.
 function scatterTrees(mask, max) {
   const { px, w, h } = mask;
@@ -484,14 +713,25 @@ const lightUniforms = {
 const nightUniform = { value: 0 };
 
 const LIGHT = SHADERS['lighting.glsl'];
+const SAT = SHADERS['satellite.glsl'];
+
+// The satellite texture and the rectangle of city it covers, shared by the ground and
+// the buildings; uSatAmt stays 0 until the tiles have been stitched together.
+const emptySat = new THREE.DataTexture(new Uint8Array([128, 128, 128, 255]), 1, 1);
+emptySat.needsUpdate = true;
+const satUniforms = {
+  uSat: { value: emptySat },
+  uSatRect: { value: new THREE.Vector4(-1, -1, 2, 2) },
+  uSatAmt: { value: 0 },
+};
 // two of the four per-copy orientations are mirror images, which reverse the triangle
 // winding, so every folded material is drawn double sided
 const buildingMat = new THREE.ShaderMaterial({
   side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['building.vert'],
-  fragmentShader: LIGHT + SHADERS['building.frag'],
+  fragmentShader: LIGHT + SAT + SHADERS['building.frag'],
   uniforms: {
-    ...foldUniforms, ...lightUniforms,
+    ...foldUniforms, ...lightUniforms, ...satUniforms,
     uBuildingTint: { value: cur.buildingTint },
     uWindowColor: { value: cur.windowColor },
     uWindowLit: { value: 0.2 },
@@ -500,9 +740,9 @@ const buildingMat = new THREE.ShaderMaterial({
 const groundMat = new THREE.ShaderMaterial({
   side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['ground.vert'],
-  fragmentShader: LIGHT + SHADERS['ground.frag'],
+  fragmentShader: LIGHT + SAT + SHADERS['ground.frag'],
   uniforms: {
-    ...foldUniforms, ...lightUniforms,
+    ...foldUniforms, ...lightUniforms, ...satUniforms,
     uGroundBase: { value: cur.groundBase },
     uGridColor: { value: cur.gridColor },
     uWater: { value: cur.water },
@@ -897,12 +1137,14 @@ function buildingSlices(buildings, cuts, R) {
         if (zb < buf || zb > sliceW - buf) { ok = false; break; }
       }
       if (!ok) continue;
-      groups[rot * SURF.cuts + sliceOf(cz / n, cuts, R)].push({ h: bld.h, pts });
+      // the quarter turn takes the roof's direction with it
+      const dir = (bld.dir + (rot ? 270 : 0)) % 360;
+      groups[rot * SURF.cuts + sliceOf(cz / n, cuts, R)].push({ h: bld.h, minH: bld.minH, roofH: bld.roofH, shape: bld.shape, dir, pts });
       any = true;
     }
     if (any) shown++;
   }
-  return { geos: groups.map(buildCityGeometry), hidden: buildings.length - shown };
+  return { geos: groups.map((g, k) => buildCityGeometry(g, sliceRot(k))), hidden: buildings.length - shown };
 }
 
 // split an indexed geometry into slices, dropping triangles outside the box or across a cut
@@ -1024,6 +1266,7 @@ const state = {
   intro: 0, // 0..1, the tunnel closing in from far away
   prevTime: 0, timeBlend: 1,
   panelHidden: false,
+  satellite: true, // real imagery on the ground, the roofs and the facade tint
 };
 {
   const ti = ['day', 'night'].indexOf(HASH.time);
@@ -1031,6 +1274,7 @@ const state = {
   const f = parseInt(HASH.fold);
   if (f >= 2 && f <= 6) state.fold = f;
   foldUniforms.uSides.value = state.fold;
+  if (HASH.sat === '0') state.satellite = false;
 }
 state.prevTime = state.timeIndex;
 setPalette(cur, TIMES[state.timeIndex]);
@@ -1086,6 +1330,14 @@ function loadCity(i) {
 
   groundMat.uniforms.uMask.value = emptyMask;
   if (!entry.mask) entry.mask = loadMask(c.areas).then((m) => ({ ...m, trees: scatterTrees(m, MAX_TREES) })).catch((e) => { console.warn('area mask failed', e); return null; });
+  satUniforms.uSatAmt.value = 0;
+  if (!entry.sat) entry.sat = loadSatellite(c.sat).catch((e) => { console.warn('imagery failed', e); return null; });
+  entry.sat.then((s) => {
+    if (!s || CITY_DATA[state.cityIndex].key !== c.key) return;
+    satUniforms.uSat.value = s.tex;
+    satUniforms.uSatRect.value.copy(s.rect);
+    satUniforms.uSatAmt.value = state.satellite ? 1 : 0;
+  });
   buildLayers();
 
   // traffic keeps to the driving side of each city; oneway roads are respected
@@ -1146,6 +1398,14 @@ function requestFold(n) {
   });
 }
 
+// the imagery only fades in once its tiles have been stitched (uSat is still the
+// placeholder until then), so this just records the wish and lets loadCity apply it
+function setSatellite(on) {
+  state.satellite = on;
+  if (satUniforms.uSat.value !== emptySat) satUniforms.uSatAmt.value = on ? 1 : 0;
+  document.querySelectorAll('#sats button').forEach((b, j) => b.classList.toggle('active', j === (on ? 1 : 0)));
+}
+
 function setTime(i) {
   if (i === state.timeIndex) return;
   state.prevTime = state.timeIndex;
@@ -1169,6 +1429,7 @@ function applyLang() {
   document.querySelectorAll('#cities button').forEach((b, i) => { b.firstChild.textContent = CITY_DATA[i].name[lang]; });
   document.querySelectorAll('#times button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].times[i]; });
   document.querySelectorAll('#folds button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].folds[i]; });
+  document.querySelectorAll('#sats button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].sats[i]; });
   const entry = decodedCities.get(CITY_DATA[state.cityIndex].key);
   $('#stats').textContent = I18N[lang].buildings(CITY_DATA[state.cityIndex].count - (entry?.byN.get(state.fold)?.hidden || 0));
   updateTitle();
@@ -1189,6 +1450,8 @@ makeButtons($('#times'), I18N[lang].times, ['Q', 'W'], setTime);
 document.querySelectorAll('#times button')[state.timeIndex].classList.add('active');
 makeButtons($('#folds'), I18N[lang].folds, ['A', 'S', 'D', 'F', 'G'], (i) => requestFold(i + 2));
 document.querySelectorAll('#folds button')[state.fold - 2].classList.add('active');
+makeButtons($('#sats'), I18N[lang].sats, ['T', 'T'], (i) => setSatellite(i === 1));
+document.querySelectorAll('#sats button')[state.satellite ? 1 : 0].classList.add('active');
 
 $('#lang').addEventListener('click', () => { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); });
 
@@ -1200,6 +1463,7 @@ addEventListener('keydown', (e) => {
   else if ('asdfg'.includes(k) && k.length === 1) requestFold('asdfg'.indexOf(k) + 2);
   else if (k === 'h') { state.panelHidden = !state.panelHidden; $('#panel').classList.toggle('hidden', state.panelHidden); }
   else if (k === 'l') { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); }
+  else if (k === 't') setSatellite(!state.satellite);
 });
 
 // ---------------------------------------------------------------- main loop

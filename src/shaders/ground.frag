@@ -39,6 +39,12 @@ void main() {
   c += uGridColor * line * 0.06 * radial * (1.0 - green);
   c *= shade(vec3(0.0, 1.0, 0.0));
 
+  // real imagery, relit by the scene: the pavement, courtyards, markings and rooftops
+  // of the actual city, with a little of the procedural ground left in to hold it together
+  float satAmt;
+  vec3 satCol = satAlbedo(satAt(vCity, satAmt)) * shade(vec3(0.0, 1.0, 0.0));
+  c = mix(c, mix(satCol, c, 0.18), satAmt * (1.0 - water));
+
   // water: sky reflection, moving ripples, sun glitter, lighter shallows near the bank
   vec3 vdir = normalize(uCamPos - vWorld);
   float fres = pow(1.0 - max(vdir.y, 0.0), 3.0);

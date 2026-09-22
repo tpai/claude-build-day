@@ -6,7 +6,8 @@ uniform float uWindowLit;
 
 varying vec3 vWorld;
 varying vec3 vNormal;
-varying vec2 vUv;      // walls: (metres along the facade, metres up)
+varying vec2 vCity;    // where this surface sits in the real city, for the imagery
+varying vec2 vUv;      // walls: (metres along the facade, metres up); roofs: (along the ridge, metres above the eaves)
 varying vec2 vFlat;    // unfolded world xz, used for roof detail
 varying float vRand;
 varying float vHeight;
@@ -99,9 +100,30 @@ void main() {
   // per-building hue: beige, brick, cool grey, blue-grey ...
   vec3 hue = 0.5 + 0.5 * cos(6.2831 * (fract(vRand * 3.1 + vTileR * 0.7) + vec3(0.0, 0.1, 0.2)));
   vec3 base = uBuildingTint * (0.68 + 0.4 * vRand) * mix(vec3(1.0), hue, 0.22) * (0.9 + 0.2 * vTileR);
+  // the imagery of this building seen from above: its roof, and the colour its walls take
+  float satAmt;
+  vec3 satAlb = satAlbedo(satAt(vCity, satAmt));
   vec3 c;
 
-  if (vWall > 0.5) {
+  if (vWall > 1.5) {
+    // pitched roof from OSM: rows of tiles or standing-seam metal, up the slope
+    float slate = step(0.45, fract(vRand * 29.0 + vTileR));
+    vec3 tileCol = mix(vec3(0.40, 0.20, 0.13), vec3(0.30, 0.31, 0.33), slate); // terracotta or zinc
+    tileCol *= 0.85 + 0.35 * fract(vRand * 7.3);
+    float row = vUv.y / mix(0.34, 0.55, slate);
+    float col = vUv.x / mix(0.24, 0.48, slate);
+    float seam = smoothstep(0.0, 0.12, fract(row)) * smoothstep(0.0, 0.1, fract(col));
+    float shift = slate > 0.5 ? 0.0 : 0.5 * step(0.5, fract(floor(row) * 0.5)); // staggered courses
+    seam = min(seam, smoothstep(0.0, 0.1, fract(col + shift)));
+    float wear = hash21(vec2(floor(col + shift), floor(row)) + vRand * 17.0);
+    base = mix(tileCol, satAlb, 0.55 * satAmt) * (0.78 + 0.32 * wear) * (0.72 + 0.4 * seam);
+    // ridges and hips catch the light, the eaves keep a shadow line
+    base *= 1.0 + 0.1 * smoothstep(0.6, 1.0, n.y);
+    base *= 0.7 + 0.3 * smoothstep(0.0, 0.5, vUv.y);
+    c = base * shade(n);
+  } else if (vWall > 0.5) {
+    // the real city's palette: keep the procedural brightness, borrow the colour
+    base *= mix(vec3(1.0), satAlb / max(lum(satAlb), 0.06), 0.32 * satAmt);
     // street-level darkening (ambient occlusion from the block)
     base *= 0.62 + 0.38 * clamp(vUv.y / min(max(vHeight, 1.0), 40.0), 0.0, 1.0);
     float glass, lit; vec3 glassTint;
@@ -114,15 +136,17 @@ void main() {
     // lit windows only really glow once the sky darkens
     c = mix(wall, glassCol, glass) + uWindowColor * lit * (0.45 + 1.3 * smoothstep(0.25, 0.7, uWindowLit));
   } else {
-    // roof: gravel/asphalt with parapet-ish rim shading and rooftop plant
+    // flat roof: the imagery already shows the real gravel, decks and plant up here,
+    // so it leads, and the procedural HVAC boxes only fill in what it is too coarse to show
     base *= 0.86 + 0.08 * hash21(floor(vFlat * 0.9));
+    base = mix(base, satAlb, 0.8 * satAmt);
     vec2 cell = floor(vFlat / 4.5);
     vec2 cf = fract(vFlat / 4.5);
     float hc = hash21(cell + vRand * 7.0 + vTileR * 23.0);
     float unit = step(0.9 - 0.06 * step(20.0, vHeight), hc) * step(0.25, cf.x) * step(cf.x, 0.75) * step(0.3, cf.y) * step(cf.y, 0.7) * step(12.0, vHeight);
     // HVAC boxes: lighter top, shaded side edge
     vec3 unitCol = uBuildingTint * (0.7 + 0.3 * fract(hc * 9.0)) * (1.0 - 0.35 * step(cf.y, 0.38));
-    base = mix(base, unitCol, unit);
+    base = mix(base, unitCol, unit * (1.0 - 0.5 * satAmt));
     c = base * shade(n);
   }
 

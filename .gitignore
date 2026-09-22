@@ -1,3 +1,4 @@
 node_modules/
 data/*.raw.json
 data/three.module.min.js
+data/tiles/
