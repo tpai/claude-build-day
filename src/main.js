@@ -449,7 +449,7 @@ camera.rotation.order = 'YXZ';
 const SURF = {
   tunnelR: 260,     // distance from the viewer to each surface (m); grows so a city's tallest building fits
   hideH: 0.8,       // buildings taller than this fraction of tunnelR are hidden
-  speed: 12,        // sideways slide (m/s)
+  speed: 24,        // sideways slide (m/s)
   buffer: 6,        // buildings this close to a band cut or the tile seam are hidden (m)
   depth: 1100,      // how far along the tunnel the copies reach (m)
   sideCopies: 2,    // copies either side along the slide direction
