@@ -447,7 +447,7 @@ camera.rotation.order = 'YXZ';
 
 // the mirror dimension: N infinite city surfaces around the viewer
 const SURF = {
-  tunnelR: 260,     // distance from the viewer to each surface (m)
+  tunnelR: 260,     // distance from the viewer to each surface (m); grows so a city's tallest building fits
   hideH: 0.8,       // buildings taller than this fraction of tunnelR are hidden
   speed: 12,        // sideways slide (m/s)
   buffer: 6,        // buildings this close to a band cut or the tile seam are hidden (m)
@@ -749,11 +749,11 @@ const frustum = new THREE.Frustum();
 const projView = new THREE.Matrix4();
 const box = new THREE.Box3();
 const corner = new THREE.Vector3();
-const tileState = { boxR: 560, bandW: 280, visibleBands: [], visibleTiles: [] };
+const tileState = { boxR: 560, tunnelR: SURF.tunnelR, depth: SURF.depth, visibleBands: [], visibleTiles: [] };
 function updateTiles() {
   const N = state.fold, R = tileState.boxR, bandW = 2 * R / N, L = 2 * R;
   const D = foldUniforms.uTunnelR.value, slide = foldUniforms.uSlide.value;
-  const jmax = Math.ceil(SURF.depth / bandW);
+  const jmax = Math.ceil(tileState.depth / bandW);
   projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
   frustum.setFromProjectionMatrix(projView);
   const bands = [], tileSet = new Map();
@@ -789,7 +789,7 @@ const bandOf = (z, N, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / 
 // buildings: whole buildings only, never cut. Hidden when taller than the tunnel allows,
 // when they sit on a band cut, or when they touch the seam where a band repeats.
 function buildingBands(buildings, N, R) {
-  const bandW = 2 * R / N, buf = SURF.buffer, maxH = SURF.tunnelR * SURF.hideH;
+  const bandW = 2 * R / N, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH;
   const groups = Array.from({ length: N }, () => []);
   let hidden = 0;
   for (const bld of buildings) {
@@ -961,6 +961,11 @@ function loadCity(i) {
   // use the square inscribed in the fetched circle so every band is fully populated
   tileState.boxR = Math.round((c.radius || 800) * 0.7);
   foldUniforms.uBoxR.value = tileState.boxR;
+  // the surfaces move away just enough for the tallest building (Taipei 101, 508 m) to fit
+  tileState.tunnelR = Math.max(SURF.tunnelR, Math.ceil((c.maxH + 20) / SURF.hideH));
+  // a wider tunnel needs longer copies and thinner fog to keep the same sense of depth
+  tileState.depth = Math.max(SURF.depth, Math.round(tileState.tunnelR * 2.2));
+  lightUniforms.uDepthFade.value = tileState.depth;
 
   groundMat.uniforms.uMask.value = emptyMask;
   if (!entry.mask) entry.mask = loadMask(c.areas).then((m) => ({ ...m, trees: scatterTrees(m, MAX_TREES) })).catch((e) => { console.warn('area mask failed', e); return null; });
@@ -1092,7 +1097,7 @@ function frame() {
   // intro: the tunnel closes in from three times its radius
   state.intro = Math.min(1, state.intro + dt / 2.0);
   const ease = 1 - Math.pow(1 - state.intro, 3);
-  foldUniforms.uTunnelR.value = SURF.tunnelR * (3 - 2 * ease);
+  foldUniforms.uTunnelR.value = tileState.tunnelR * (3 - 2 * ease);
 
   // transitions: fade out, apply, fade in
   let fadeTarget = 1;
@@ -1114,7 +1119,7 @@ function frame() {
   partMat.uniforms.uOpacity.value = cur.opacity * (1 - 0.9 * Math.sin(state.timeBlend * Math.PI) ** 2);
   partMat.uniforms.uFall.value = cur.fall; partMat.uniforms.uSway.value = cur.sway;
   partMat.uniforms.uSize.value = cur.size; partMat.uniforms.uSpin.value = cur.spin;
-  lightUniforms.uFogDensity.value = cur.fogDensity * 1.4;
+  lightUniforms.uFogDensity.value = cur.fogDensity * 1.4 * Math.min(1, SURF.tunnelR / tileState.tunnelR);
   buildingMat.uniforms.uWindowLit.value = cur.windowLit;
   nightUniform.value = THREE.MathUtils.smoothstep(cur.windowLit, 0.25, 0.7);
   treeMat.uniforms.uBlossomAmt.value = cur.blossomAmt;
