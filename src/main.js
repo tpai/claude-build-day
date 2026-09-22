@@ -16,6 +16,7 @@ const I18N = {
     lang: 'EN', attribution: '© OpenStreetMap 貢獻者 · 空拍影像 Esri、Maxar、Earthstar Geographics',
     times: ['白天', '夜晚'],
     buildings: (n) => `${n} 棟建築`,
+    collapse: '收合面板', expand: '展開面板',
     loading: '正在展開城市…',
   },
   en: {
@@ -26,6 +27,7 @@ const I18N = {
     lang: '繁中', attribution: '© OpenStreetMap contributors · Imagery: Esri, Maxar, Earthstar Geographics',
     times: ['Day', 'Night'],
     buildings: (n) => `${n} buildings`,
+    collapse: 'Collapse panel', expand: 'Show panel',
     loading: 'Unfolding the city…',
   },
 };
@@ -1273,7 +1275,7 @@ const state = {
   transition: null, // { apply } : fade out, apply, fade in
   intro: 0, // 0..1, the tunnel closing in from far away
   prevTime: 0, timeBlend: 1,
-  panelHidden: false,
+  panelCollapsed: false,
   satellite: true, // real imagery on the ground, the roofs and the facade tint
 };
 {
@@ -1441,6 +1443,7 @@ function applyLang() {
   document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = I18N[lang][el.dataset.i18n]; });
   $('#lang').textContent = I18N[lang].lang;
+  $('#panelToggle').setAttribute('aria-label', I18N[lang][state.panelCollapsed ? 'expand' : 'collapse']);
   document.querySelectorAll('#cities button').forEach((b, i) => { b.firstChild.textContent = CITY_DATA[i].name[lang]; });
   document.querySelectorAll('#times button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].times[i]; });
   document.querySelectorAll('#folds button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].folds[i]; });
@@ -1468,6 +1471,15 @@ document.querySelectorAll('#folds button')[state.fold - 2].classList.add('active
 makeButtons($('#sats'), I18N[lang].sats, ['T', 'T'], (i) => setSatellite(i === 1));
 document.querySelectorAll('#sats button')[state.satellite ? 1 : 0].classList.add('active');
 
+function setPanelCollapsed(on) {
+  state.panelCollapsed = on;
+  $('#panel').classList.toggle('collapsed', on);
+  const t = $('#panelToggle');
+  t.setAttribute('aria-expanded', String(!on));
+  t.setAttribute('aria-label', I18N[lang][on ? 'expand' : 'collapse']);
+}
+$('#panelToggle').addEventListener('click', () => setPanelCollapsed(!state.panelCollapsed));
+
 $('#lang').addEventListener('click', () => { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); });
 
 addEventListener('keydown', (e) => {
@@ -1476,7 +1488,7 @@ addEventListener('keydown', (e) => {
   else if (k === 'q') setTime(0);
   else if (k === 'w') setTime(1);
   else if ('asdfg'.includes(k) && k.length === 1) requestFold('asdfg'.indexOf(k) + 2);
-  else if (k === 'h') { state.panelHidden = !state.panelHidden; $('#panel').classList.toggle('hidden', state.panelHidden); }
+  else if (k === 'h') setPanelCollapsed(!state.panelCollapsed);
   else if (k === 'l') { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); }
   else if (k === 't') setSatellite(!state.satellite);
 });

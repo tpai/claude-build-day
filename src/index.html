@@ -18,6 +18,10 @@
 <button id="lang" type="button" aria-label="Switch language">EN</button>
 
 <aside id="panel">
+  <button id="panelToggle" type="button" aria-expanded="true" aria-controls="panelBody">
+    <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4.5 6 8.5 10 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <div id="panelBody">
   <div class="row">
     <span class="label" data-i18n="city"></span>
     <div class="group" id="cities"></div>
@@ -36,6 +40,7 @@
   </div>
   <div class="hint" data-i18n="hint"></div>
   <div class="foot"><span id="stats"></span><span id="attribution" data-i18n="attribution"></span></div>
+  </div>
 </aside>
 
 <div id="loading"><div class="spinner"></div><div id="loadingText">載入中…</div></div>
