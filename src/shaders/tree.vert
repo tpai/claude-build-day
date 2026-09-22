@@ -8,7 +8,7 @@ varying vec3 vColor;
 varying float vTileR;
 
 void main() {
-  if (tileDrops(aTile + vec4(3.3, 3.3, 3.3, 0.0), aTreeColor.b, 0.45)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  if (tileDrops(aTile + vec4(3.3, 3.3, 3.3, 0.0), aTreeColor.b, 0.35)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   vec3 wp = position;
   // canopies sway a little
   wp.x += step(2.5, aLocalY) * 0.25 * sin(uTime * 1.3 + wp.z * 0.05) * aLocalY / 6.0;

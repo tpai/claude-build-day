@@ -5,7 +5,7 @@
 // meshes sit at identity transform: `position` is the original city space.
 uniform float uTime;
 uniform float uSides;     // number of faces, 2 .. 6
-uniform float uSlices;    // how many slices of the city the copies are drawn from
+uniform float uSliceW;    // depth of one slice of city along the tunnel axis (metres)
 uniform float uBoxR;      // half size of the square of city that is used (metres)
 uniform float uTunnelR;   // distance from the viewer to each face (metres)
 uniform float uSlide;     // sideways offset within one copy (metres, 0 .. 2 * uBoxR)
@@ -28,7 +28,7 @@ float tileRand(vec3 t) {
 vec3 mirrorFold(vec3 p, vec4 tile) {
   float N = uSides;
   float f = tile.z;
-  float sliceW = 2.0 * uBoxR / uSlices;
+  float sliceW = uSliceW;
   // one of four orientations, so the streets run a different way in each copy; every one
   // maps the slot exactly onto itself. Two of them are mirror images, which reverse the
   // triangle winding, so the folded materials are drawn double sided.

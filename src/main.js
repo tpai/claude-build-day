@@ -454,7 +454,8 @@ const SURF = {
   depth: 1100,      // how far along the tunnel the copies reach (m)
   sideCopies: 2,    // copies either side along the slide direction
   maxStretch: 1.08, // the tallest a copy can make its buildings (see tileHeight in fold.glsl)
-  slices: 8,        // the city is cut into this many slices; each copy shows one of them
+  cuts: 3,          // slices per orientation: each one is a third of the city, deep enough to hold whole blocks
+  rotations: 2,     // slices are taken from the city as it stands and from it turned a quarter turn
   agentTiles: 48,   // only the nearest copies get traffic and pedestrians
   // parallel faces sit opposite each other and never crowd; three or more close in
   // around the viewer, so the tunnel widens with the number of faces
@@ -465,7 +466,7 @@ const foldUniforms = {
   uSides: { value: 4 },
   uBoxR: { value: 560 },
   uTunnelR: { value: SURF.tunnelR },
-  uSlices: { value: 8 },
+  uSliceW: { value: 140 },
   uSlide: { value: 0 },
   uWraps: { value: 0 },
   uTile: { value: new THREE.Vector4(0, 0, 0, 0) },
@@ -799,15 +800,23 @@ const box = new THREE.Box3();
 const corner = new THREE.Vector3();
 const tileState = { boxR: 560, tunnelR: SURF.tunnelR, depth: SURF.depth, tiles: [], perSlice: [] };
 
-// which slice of the city a copy shows: a hash of its permanent identity
-function tileSlice(i, j, f, M) {
+// which slice of the city a copy shows: a hash of its permanent identity, nudged along
+// when it matches a neighbour, since two identical slices side by side are what reads as
+// a repeat. Neighbours are compared by their own hash, so this stays stateless.
+function sliceHash(i, j, f, M) {
   let x = (Math.imul(i + 1013, 374761393) ^ Math.imul(j + 8623, 668265263) ^ Math.imul(f + 127, 2246822519)) >>> 0;
   x = Math.imul(x ^ (x >>> 13), 1274126177) >>> 0;
   return ((x ^ (x >>> 16)) >>> 0) % M;
 }
+function tileSlice(i, j, f, M) {
+  let k = sliceHash(i, j, f, M);
+  const a = sliceHash(i - 1, j, f, M), b = sliceHash(i, j - 1, f, M);
+  for (let guard = 0; (k === a || k === b) && guard < M; guard++) k = (k + 1) % M;
+  return k;
+}
 
 function updateTiles() {
-  const N = state.fold, R = tileState.boxR, M = SURF.slices, W = 2 * R / M, L = 2 * R;
+  const N = state.fold, R = tileState.boxR, M = NSLICES, W = 2 * R / SURF.cuts, L = 2 * R;
   const D = foldUniforms.uTunnelR.value, slide = foldUniforms.uSlide.value, wraps = foldUniforms.uWraps.value;
   const jmax = Math.ceil(tileState.depth / W);
   projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -832,7 +841,7 @@ function updateTiles() {
         }
         if (!frustum.intersectsBox(box)) continue;
         const k = tileSlice(i, j, f, M);
-        const tile = [i, j, f, -R + (k + 0.5) * W, k];
+        const tile = [i, j, f, -R + (sliceIdx(k) + 0.5) * W, k];
         perSlice[k].push(tile);
         box.getCenter(corner);
         tile.d = corner.lengthSq();
@@ -849,39 +858,67 @@ function updateTiles() {
 }
 
 // ---------------------------------------------------------------- per-slice geometry
-const sliceOf = (z, M, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / M)), 0, M - 1);
+// A slice is a strip of the city one third deep. Half of them are taken from the city
+// turned a quarter turn, whose streets run the other way, so no two slices resemble
+// each other: slices 0..cuts-1 are the city as it stands, the rest are the turned city.
+const NSLICES = SURF.cuts * SURF.rotations;
+const sliceOf = (z, cuts, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / cuts)), 0, cuts - 1);
+const sliceRot = (k) => Math.floor(k / SURF.cuts);
+const sliceIdx = (k) => k % SURF.cuts;
+// a quarter turn about the vertical axis: (x, z) -> (z, -x), and its inverse
+const turnX = (rot, x, z) => (rot ? z : x);
+const turnZ = (rot, x, z) => (rot ? -x : z);
+const unturnX = (rot, x, z) => (rot ? -z : x);
+const unturnZ = (rot, x, z) => (rot ? x : z);
 
 // buildings: whole buildings only, never cut. Hidden when taller than the tunnel allows,
 // when they sit on a band cut, or when they touch the seam where a band repeats.
-function buildingSlices(buildings, M, R) {
-  const sliceW = 2 * R / M, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH / SURF.maxStretch;
-  const groups = Array.from({ length: M }, () => []);
-  let hidden = 0;
+function buildingSlices(buildings, cuts, R) {
+  const sliceW = 2 * R / cuts, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH / SURF.maxStretch;
+  const groups = Array.from({ length: NSLICES }, () => []);
+  let shown = 0;
   for (const bld of buildings) {
-    if (bld.h > maxH) { hidden++; continue; }
-    let ok = true, cz = 0;
-    for (let i = 0; i < bld.pts.length; i += 2) {
-      const x = bld.pts[i], z = bld.pts[i + 1];
-      cz += z;
-      if (Math.abs(x) > R - buf || Math.abs(z) > R - buf) { ok = false; break; }
-      const zb = (z + R) % sliceW;
-      if (zb < buf || zb > sliceW - buf) { ok = false; break; }
+    if (bld.h > maxH) continue;
+    const n = bld.pts.length / 2;
+    let inside = true;
+    for (let i = 0; i < bld.pts.length && inside; i += 2) inside = Math.abs(bld.pts[i]) <= R - buf && Math.abs(bld.pts[i + 1]) <= R - buf;
+    if (!inside) continue;
+    // a building that straddles a cut is left out of that slice, but still stands in the
+    // other orientation's slices, where the cuts run the other way
+    let any = false;
+    for (let rot = 0; rot < SURF.rotations; rot++) {
+      const pts = new Float32Array(bld.pts.length);
+      let ok = true, cz = 0;
+      for (let i = 0; i < bld.pts.length; i += 2) {
+        const x = bld.pts[i], z = bld.pts[i + 1];
+        const rx = turnX(rot, x, z), rz = turnZ(rot, x, z);
+        pts[i] = rx; pts[i + 1] = rz; cz += rz;
+        const zb = (rz + R) % sliceW;
+        if (zb < buf || zb > sliceW - buf) { ok = false; break; }
+      }
+      if (!ok) continue;
+      groups[rot * SURF.cuts + sliceOf(cz / n, cuts, R)].push({ h: bld.h, pts });
+      any = true;
     }
-    if (!ok) { hidden++; continue; }
-    groups[sliceOf(cz / (bld.pts.length / 2), M, R)].push(bld);
+    if (any) shown++;
   }
-  return { geos: groups.map(buildCityGeometry), hidden };
+  return { geos: groups.map(buildCityGeometry), hidden: buildings.length - shown };
 }
 
 // split an indexed geometry into slices, dropping triangles outside the box or across a cut
-function splitBySlice(g, M, R) {
+function splitBySlice(src, cuts, R) {
+  const out = [];
+  for (let rot = 0; rot < SURF.rotations; rot++) out.push(...splitOneOrientation(rot ? src.clone().rotateY(Math.PI / 2) : src, cuts, R));
+  return out;
+}
+function splitOneOrientation(g, cuts, R) {
   const pos = g.getAttribute('position');
   const index = g.index.array;
   const names = Object.keys(g.attributes);
-  const out = Array.from({ length: M }, () => ({ idx: [], remap: new Map() }));
+  const out = Array.from({ length: cuts }, () => ({ idx: [], remap: new Map() }));
   for (let t = 0; t < index.length; t += 3) {
     const a = index[t], b = index[t + 1], c = index[t + 2];
-    const ba = sliceOf(pos.getZ(a), M, R), bb = sliceOf(pos.getZ(b), M, R), bc = sliceOf(pos.getZ(c), M, R);
+    const ba = sliceOf(pos.getZ(a), cuts, R), bb = sliceOf(pos.getZ(b), cuts, R), bc = sliceOf(pos.getZ(c), cuts, R);
     if (ba !== bb || bb !== bc) continue;
     let inside = true;
     for (const v of [a, b, c]) if (Math.abs(pos.getX(v)) > R || Math.abs(pos.getZ(v)) > R) { inside = false; break; }
@@ -905,12 +942,21 @@ function splitBySlice(g, M, R) {
   });
 }
 
-function groundSlices(M, R) {
-  const sliceW = 2 * R / M;
-  return Array.from({ length: M }, (_, k) => {
+function groundSlices(cuts, R) {
+  const sliceW = 2 * R / cuts;
+  return Array.from({ length: NSLICES }, (_, k) => {
     const g = new THREE.PlaneGeometry(2 * R, sliceW, Math.ceil(2 * R / 25), Math.ceil(sliceW / 25));
     g.rotateX(-Math.PI / 2);
-    g.translate(0, -0.05, -R + (k + 0.5) * sliceW);
+    g.translate(0, -0.05, -R + (sliceIdx(k) + 0.5) * sliceW);
+    // the mask is read in city coordinates, so turned slices carry them along
+    const rot = sliceRot(k), pos = g.getAttribute('position');
+    const city = new Float32Array(pos.count * 2);
+    for (let v = 0; v < pos.count; v++) {
+      const x = pos.getX(v), z = pos.getZ(v);
+      city[2 * v] = unturnX(rot, x, z);
+      city[2 * v + 1] = unturnZ(rot, x, z);
+    }
+    g.setAttribute('aCity', new THREE.BufferAttribute(city, 2));
     return g;
   });
 }
@@ -930,21 +976,23 @@ const treeProto = (() => {
   }
   return { pos, nrm, n: pos.length / 3 };
 })();
-function treeSlices(treeXZ, count, M, R) {
-  const groups = Array.from({ length: M }, () => []);
+function treeSlices(treeXZ, count, cuts, R) {
+  const groups = Array.from({ length: NSLICES }, () => []);
   for (let k = 0; k < count; k++) {
     const x = treeXZ[2 * k], z = treeXZ[2 * k + 1];
     if (Math.abs(x) > R || Math.abs(z) > R) continue;
-    groups[sliceOf(z, M, R)].push(k);
+    for (let rot = 0; rot < SURF.rotations; rot++) groups[rot * SURF.cuts + sliceOf(turnZ(rot, x, z), cuts, R)].push(k);
   }
   const { pos: P, nrm: Nn, n } = treeProto;
   const m = new THREE.Matrix4(), nm = new THREE.Matrix3(), v = new THREE.Vector3();
-  return groups.map((ids) => {
+  return groups.map((ids, gi) => {
+    const rot = sliceRot(gi);
     const pos = new Float32Array(ids.length * n * 3), nrm = new Float32Array(ids.length * n * 3);
     const col = new Float32Array(ids.length * n * 3), ly = new Float32Array(ids.length * n);
     ids.forEach((k, t) => {
       const sc = 0.7 + 0.7 * hash01(k * 17 + 3);
-      m.makeRotationY(hash01(k * 5 + 1) * Math.PI * 2).scale(new THREE.Vector3(sc, sc * (0.9 + 0.3 * hash01(k * 3 + 9)), sc)).setPosition(treeXZ[2 * k], 0, treeXZ[2 * k + 1]);
+      const tx = treeXZ[2 * k], tz = treeXZ[2 * k + 1];
+      m.makeRotationY(hash01(k * 5 + 1) * Math.PI * 2).scale(new THREE.Vector3(sc, sc * (0.9 + 0.3 * hash01(k * 3 + 9)), sc)).setPosition(turnX(rot, tx, tz), 0, turnZ(rot, tx, tz));
       nm.getNormalMatrix(m);
       const variation = hash01(k * 11 + 2), seed = hash01(k * 23 + 5);
       for (let i = 0; i < n; i++) {
@@ -995,7 +1043,7 @@ const carDummy = new THREE.Object3D();
 function buildLayers() {
   const c = CITY_DATA[state.cityIndex];
   const entry = decodedCities.get(c.key);
-  const N = state.fold, R = tileState.boxR, M = SURF.slices;
+  const N = state.fold, R = tileState.boxR, cuts = SURF.cuts;
   // the surfaces move away just enough for the tallest building (Taipei 101, 508 m) to fit,
   // then further still as the faces close in around the viewer
   tileState.tunnelR = Math.round(Math.max(SURF.tunnelR, (c.maxH * SURF.maxStretch + 20) / SURF.hideH) * SURF.sidesScale[N]);
@@ -1004,12 +1052,12 @@ function buildLayers() {
   lightUniforms.uDepthFade.value = tileState.depth;
   const key = N;
   if (!entry.byN.has(key)) {
-    const { geos, hidden } = buildingSlices(entry.buildings, M, R);
-    entry.byN.set(key, { buildings: geos, hidden, roads: splitBySlice(entry.roadGeo, M, R), ground: groundSlices(M, R), trees: null });
+    const { geos, hidden } = buildingSlices(entry.buildings, cuts, R);
+    entry.byN.set(key, { buildings: geos, hidden, roads: splitBySlice(entry.roadGeo, cuts, R), ground: groundSlices(cuts, R), trees: null });
   }
   const layers = entry.byN.get(key);
-  foldUniforms.uSlices.value = M;
-  makeAgentSlices(M);
+  foldUniforms.uSliceW.value = 2 * R / cuts;
+  makeAgentSlices(NSLICES);
   buildingLayer.set(layers.buildings);
   roadLayer.set(layers.roads);
   groundLayer.set(layers.ground);
@@ -1017,7 +1065,7 @@ function buildLayers() {
   entry.mask?.then((m) => {
     if (!m || state.cityIndex !== CITY_DATA.indexOf(c) || state.fold !== N) return;
     groundMat.uniforms.uMask.value = m.tex;
-    if (!layers.trees) layers.trees = treeSlices(m.trees.xz, m.trees.n, M, R);
+    if (!layers.trees) layers.trees = treeSlices(m.trees.xz, m.trees.n, cuts, R);
     treeLayer.set(layers.trees);
   });
   $('#stats').textContent = I18N[lang].buildings(c.count - layers.hidden);
@@ -1195,33 +1243,40 @@ function frame() {
   nightUniform.value = THREE.MathUtils.smoothstep(cur.windowLit, 0.25, 0.7);
   treeMat.uniforms.uBlossomAmt.value = cur.blossomAmt;
 
-  // traffic + pedestrians, sorted into the slice of the city they are standing in
-  const M = SURF.slices, R = tileState.boxR;
-  if (traffic && carSlices.length === M) {
+  // traffic + pedestrians, sorted into the slice they stand in: one per orientation,
+  // with their coordinates turned to match the turned slices
+  const cuts = SURF.cuts, R = tileState.boxR;
+  if (traffic && carSlices.length === NSLICES) {
     for (const s of carSlices) s.count = 0;
     traffic.step(dt, (k, x, z, hx, hz) => {
-      const slice = carSlices[sliceOf(z, M, R)];
-      if (slice.count >= MAX_CARS) return;
-      carDummy.position.set(x, 0, z);
-      carDummy.rotation.y = Math.atan2(-hz, hx);
-      carDummy.updateMatrix();
-      carDummy.matrix.toArray(slice.matrix.array, slice.count * 16);
-      slice.color.array.set(carColors.subarray(k * 3, k * 3 + 3), slice.count * 3);
-      slice.count++;
+      for (let rot = 0; rot < SURF.rotations; rot++) {
+        const rx = turnX(rot, x, z), rz = turnZ(rot, x, z);
+        const slice = carSlices[rot * cuts + sliceOf(rz, cuts, R)];
+        if (slice.count >= MAX_CARS) continue;
+        carDummy.position.set(rx, 0, rz);
+        carDummy.rotation.y = Math.atan2(-turnZ(rot, hx, hz), turnX(rot, hx, hz));
+        carDummy.updateMatrix();
+        carDummy.matrix.toArray(slice.matrix.array, slice.count * 16);
+        slice.color.array.set(carColors.subarray(k * 3, k * 3 + 3), slice.count * 3);
+        slice.count++;
+      }
     });
     for (const s of carSlices) { s.matrix.needsUpdate = true; s.color.needsUpdate = true; }
   }
-  if (crowd && peopleSlices.length === M) {
+  if (crowd && peopleSlices.length === NSLICES) {
     for (const s of peopleSlices) s.count = 0;
     const seeds = peopleGeo.getAttribute('aSeed').array;
     crowd.step(dt, (k, x, z) => {
-      const slice = peopleSlices[sliceOf(z, M, R)];
-      if (slice.count >= MAX_PEOPLE) return;
-      const pos = slice.geo.getAttribute('position').array, sd = slice.geo.getAttribute('aSeed').array;
-      const o = slice.count * 3;
-      pos[o] = x; pos[o + 1] = 0.3; pos[o + 2] = z;
-      sd[o] = seeds[3 * k]; sd[o + 1] = seeds[3 * k + 1]; sd[o + 2] = seeds[3 * k + 2];
-      slice.count++;
+      for (let rot = 0; rot < SURF.rotations; rot++) {
+        const rx = turnX(rot, x, z), rz = turnZ(rot, x, z);
+        const slice = peopleSlices[rot * cuts + sliceOf(rz, cuts, R)];
+        if (slice.count >= MAX_PEOPLE) continue;
+        const pos = slice.geo.getAttribute('position').array, sd = slice.geo.getAttribute('aSeed').array;
+        const o = slice.count * 3;
+        pos[o] = rx; pos[o + 1] = 0.3; pos[o + 2] = rz;
+        sd[o] = seeds[3 * k]; sd[o + 1] = seeds[3 * k + 1]; sd[o + 2] = seeds[3 * k + 2];
+        slice.count++;
+      }
     });
     for (const s of peopleSlices) { s.geo.getAttribute('position').needsUpdate = true; s.geo.getAttribute('aSeed').needsUpdate = true; }
   }

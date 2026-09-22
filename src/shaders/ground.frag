@@ -8,6 +8,7 @@ uniform sampler2D uMask;   // R = water, G = parks, over the whole ground plane
 uniform float uGroundSize;
 varying vec3 vWorld;
 varying vec2 vFlat;
+varying vec2 vCity;
 varying float vTileR;
 
 // value noise for patches of soil / lawn between the blocks
@@ -20,7 +21,7 @@ float vnoise(vec2 p) {
 void main() {
   float radial = smoothstep(1100.0, 300.0, length(vFlat));
   float n1 = vnoise(vFlat * 0.045), n2 = vnoise(vFlat * 0.2);
-  vec2 muv = vFlat / uGroundSize + 0.5;
+  vec2 muv = vCity / uGroundSize + 0.5;
   vec2 m = texture2D(uMask, muv).rg * step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
   float water = smoothstep(0.4, 0.6, m.r);
   float green = smoothstep(0.4, 0.6, m.g) * (1.0 - water);

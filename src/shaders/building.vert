@@ -12,7 +12,7 @@ varying float vWall;
 varying float vTileR;
 
 void main() {
-  if (tileDrops(aTile, aRand, 0.3)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  if (tileDrops(aTile, aRand, 0.18)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   // each copy of a band gets its own skyline: the same buildings, a little taller or shorter
   float hs = tileHeight(aTile);
   vec3 p = vec3(position.x, position.y * hs, position.z);
