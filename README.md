@@ -39,7 +39,7 @@
 mirror-dimension.html#city=tokyo&time=night&fold=6&lang=en&intro=0
 ```
 
-`city` 可以是 key(taipei / tokyo / newyork / paris / hongkong)或索引 0–4;`time` 為 day / night(預設白天);`fold` 為 2–6 的切面數(預設 4);`intro=0` 跳過開場隧道收攏的動畫;`sat=0` 開場就關掉空拍影像。
+`city` 可以是 key(taipei / tokyo / newyork / paris / hongkong)或索引 0–4;`time` 為 day / night(預設白天);`fold` 為 2–6 的切面數(預設 2,即兩片平行);`intro=0` 跳過開場隧道收攏的動畫;`sat=0` 開場就關掉空拍影像。
 `yaw`、`pitch`(弧度)與 `fov` 可指定初始視線方向與視角,適合截圖。
 
 ## 重新建置

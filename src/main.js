@@ -995,8 +995,16 @@ addEventListener('resize', resize);
 resize();
 
 // ---------------------------------------------------------------- camera: fixed in the middle, look around
+// Where each face count is best seen from. Three faces and up close into a prism, so the
+// view looks down the tunnel at the widest field of view, where the whole cut fits on
+// screen and reads as its shape; two parallel surfaces have no cross section to show, so
+// the view turns across them instead, closer in, where the surface overhead slides towards
+// the viewer and the one underfoot slides away.
+const FOV_MIN = 40, FOV_MAX = 90;
+const foldYaw = (n) => (n === 2 ? -Math.PI / 2 : 0);
+const foldFov = (n) => (n === 2 ? 65 : FOV_MAX);
 const view = {
-  yaw: 0, pitch: -0.05, fov: 65,
+  yaw: foldYaw(2), pitch: -0.05, fov: foldFov(2),
   dragging: false, lastX: 0, lastY: 0, pinchDist: 0,
   vYaw: 0, vPitch: 0,
 };
@@ -1014,7 +1022,7 @@ canvas.addEventListener('pointermove', (e) => {
 const endDrag = () => { view.dragging = false; };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
-const setFov = (f) => { view.fov = THREE.MathUtils.clamp(f, 40, 90); };
+const setFov = (f) => { view.fov = THREE.MathUtils.clamp(f, FOV_MIN, FOV_MAX); };
 canvas.addEventListener('wheel', (e) => { e.preventDefault(); setFov(view.fov * Math.exp(e.deltaY * 0.001)); }, { passive: false });
 canvas.addEventListener('touchstart', (e) => { if (e.touches.length === 2) view.pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }, { passive: true });
 canvas.addEventListener('touchmove', (e) => {
@@ -1260,7 +1268,7 @@ function treeSlices(treeXZ, count, cuts, R) {
 const state = {
   cityIndex: 0,
   timeIndex: 0,
-  fold: 4, // number of faces, 2..6
+  fold: 2, // number of faces, 2..6
   fade: 0, // post-process brightness, 0 = black
   transition: null, // { apply } : fade out, apply, fade in
   intro: 0, // 0..1, the tunnel closing in from far away
@@ -1274,6 +1282,8 @@ const state = {
   const f = parseInt(HASH.fold);
   if (f >= 2 && f <= 6) state.fold = f;
   foldUniforms.uSides.value = state.fold;
+  view.yaw = foldYaw(state.fold); // #yaw= and #fov= still override, further down
+  view.fov = foldFov(state.fold);
   if (HASH.sat === '0') state.satellite = false;
 }
 state.prevTime = state.timeIndex;
@@ -1393,6 +1403,11 @@ function requestFold(n) {
   requestTransition(() => {
     state.fold = n;
     foldUniforms.uSides.value = n;
+    // the swap happens behind a fade to black, so the view can be turned back to the
+    // angle this face count reads best from without the turn being seen
+    view.yaw = foldYaw(n);
+    view.fov = foldFov(n);
+    view.vYaw = 0;
     document.querySelectorAll('#folds button').forEach((b, j) => b.classList.toggle('active', j === n - 2));
     buildLayers();
   });
