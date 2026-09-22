@@ -5,36 +5,39 @@
 // meshes sit at identity transform: `position` is the original city space.
 uniform float uTime;
 uniform float uSides;     // number of faces, 2 .. 6
+uniform float uSlices;    // how many slices of the city the copies are drawn from
 uniform float uBoxR;      // half size of the square of city that is used (metres)
 uniform float uTunnelR;   // distance from the viewer to each face (metres)
 uniform float uSlide;     // sideways offset within one copy (metres, 0 .. 2 * uBoxR)
 uniform float uWraps;     // how many whole copies the surfaces have already slid past
-uniform vec3 uTile;       // dynamic meshes: (copy along the slide, copy along the tunnel, band or -1 = derive from z)
+uniform vec4 uTile;       // dynamic meshes: see mirrorFold
 
 const float FOLD_PI = 3.14159265;
 
 // Every copy of a band has a permanent identity, so each one can look different.
 // The index along the slide is absolute (it travels with the content, see uWraps),
 // which keeps a copy's identity fixed as it drifts past the viewer.
-float tileRand(vec3 tile) {
-  vec3 p = fract(tile * vec3(0.1031, 0.1030, 0.0973));
+float tileRand(vec3 t) {
+  vec3 p = fract(t * vec3(0.1031, 0.1030, 0.0973));
   p += dot(p, p.yzx + 33.33);
   return fract((p.x + p.y) * p.z);
 }
 
-// tile: x = copy index along the slide direction, y = copy index along the tunnel axis,
-// z = band index, or < 0 to derive it from p.z
-vec3 mirrorFold(vec3 p, vec3 tile) {
+// tile: x = copy index along the slide direction, y = slot index along the tunnel axis,
+// z = which face it is on, w = centre (in city z) of the slice of city this copy shows
+vec3 mirrorFold(vec3 p, vec4 tile) {
   float N = uSides;
-  float bandW = 2.0 * uBoxR / N;
-  float b = tile.z >= 0.0 ? tile.z : clamp(floor((p.z + uBoxR) / bandW), 0.0, N - 1.0);
-  float bandCentre = -uBoxR + (b + 0.5) * bandW;
-  // half of the copies are turned around: the streets then run the other way, and the
-  // copy still fills its slot exactly (a half turn about the surface normal, so windings hold)
-  float s = tileRand(vec3(tile.xy, b)) < 0.5 ? -1.0 : 1.0;
-  float u = s * p.x + (tile.x + uWraps) * 2.0 * uBoxR + uSlide;  // along the face, sideways for the viewer
-  float v = s * (p.z - bandCentre) + tile.y * bandW;             // along the tunnel axis
-  float th = 0.5 * FOLD_PI - 2.0 * FOLD_PI * b / N;   // face 0 at the top, then clockwise
+  float f = tile.z;
+  float sliceW = 2.0 * uBoxR / uSlices;
+  // one of four orientations, so the streets run a different way in each copy; every one
+  // maps the slot exactly onto itself. Two of them are mirror images, which reverse the
+  // triangle winding, so the folded materials are drawn double sided.
+  float r = tileRand(vec3(tile.xy, f));
+  float su = r < 0.5 ? 1.0 : -1.0;
+  float sv = fract(r * 17.0) < 0.5 ? 1.0 : -1.0;
+  float u = su * p.x + (tile.x + uWraps) * 2.0 * uBoxR + uSlide;  // along the face, sideways for the viewer
+  float v = sv * (p.z - tile.w) + tile.y * sliceW;                // along the tunnel axis
+  float th = 0.5 * FOLD_PI - 2.0 * FOLD_PI * f / N;   // face 0 at the top, then clockwise
   vec2 c = vec2(cos(th), sin(th));                    // face centre direction
   vec2 t = vec2(-sin(th), cos(th));                   // slide direction (same rotational sense on every face)
   vec2 xy = c * uTunnelR - c * p.y + t * u;           // surface normal points at the viewer
@@ -42,4 +45,11 @@ vec3 mirrorFold(vec3 p, vec3 tile) {
 }
 
 // how much taller or shorter this copy's buildings are
-float tileHeight(vec3 tile) { return 0.82 + 0.26 * tileRand(tile + vec3(11.5, 3.7, 19.3)); }
+float tileHeight(vec4 tile) { return 0.82 + 0.26 * tileRand(tile.xyz + vec3(11.5, 3.7, 19.3)); }
+
+// Each copy is missing a different random share of its buildings and trees, so the
+// blocks themselves differ and not just their paint. `seed` identifies the object.
+bool tileDrops(vec4 tile, float seed, float most) {
+  float rate = most * tileRand(tile.xyz + vec3(13.7, 5.3, 2.1));
+  return tileRand(vec3(seed * 131.0, tile.x * 1.7 + tile.y * 3.1, tile.z + tile.w * 0.01)) < rate;
+}

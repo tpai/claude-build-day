@@ -454,6 +454,8 @@ const SURF = {
   depth: 1100,      // how far along the tunnel the copies reach (m)
   sideCopies: 2,    // copies either side along the slide direction
   maxStretch: 1.08, // the tallest a copy can make its buildings (see tileHeight in fold.glsl)
+  slices: 8,        // the city is cut into this many slices; each copy shows one of them
+  agentTiles: 48,   // only the nearest copies get traffic and pedestrians
   // parallel faces sit opposite each other and never crowd; three or more close in
   // around the viewer, so the tunnel widens with the number of faces
   sidesScale: [1, 1, 1, 1.35, 1.6, 1.85, 2.1],
@@ -463,9 +465,10 @@ const foldUniforms = {
   uSides: { value: 4 },
   uBoxR: { value: 560 },
   uTunnelR: { value: SURF.tunnelR },
+  uSlices: { value: 8 },
   uSlide: { value: 0 },
   uWraps: { value: 0 },
-  uTile: { value: new THREE.Vector3(0, 0, -1) },
+  uTile: { value: new THREE.Vector4(0, 0, 0, 0) },
 };
 const lightUniforms = {
   uCamPos: { value: new THREE.Vector3() },
@@ -480,7 +483,10 @@ const lightUniforms = {
 const nightUniform = { value: 0 };
 
 const LIGHT = SHADERS['lighting.glsl'];
+// two of the four per-copy orientations are mirror images, which reverse the triangle
+// winding, so every folded material is drawn double sided
 const buildingMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['building.vert'],
   fragmentShader: LIGHT + SHADERS['building.frag'],
   uniforms: {
@@ -491,6 +497,7 @@ const buildingMat = new THREE.ShaderMaterial({
   },
 });
 const groundMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['ground.vert'],
   fragmentShader: LIGHT + SHADERS['ground.frag'],
   uniforms: {
@@ -507,62 +514,63 @@ const emptyMask = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
 emptyMask.needsUpdate = true;
 groundMat.uniforms.uMask.value = emptyMask;
 const roadMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['road.vert'],
   fragmentShader: LIGHT + SHADERS['road.frag'],
   depthWrite: false, // ribbons overlap at junctions; the depth test against ground/buildings is enough
   uniforms: { ...foldUniforms, ...lightUniforms, uNight: nightUniform, uWindowColor: { value: cur.windowColor } },
 });
 const treeMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['tree.vert'],
   fragmentShader: LIGHT + SHADERS['tree.frag'],
   uniforms: { ...foldUniforms, ...lightUniforms, uCanopy: { value: cur.canopy }, uBlossom: { value: cur.blossom }, uBlossomAmt: { value: 0 } },
 });
 
-// Static city layers are cut into one geometry per band. Each band is an
-// InstancedBufferGeometry whose instances are the visible copies (tiles) of
-// that band on its surface; aTile = (copy along slide, copy along tunnel, band).
-const MAX_TILES = (2 * SURF.sideCopies + 1) * 41;
-class BandLayer {
+// Static city layers are cut into one geometry per slice of the city. Each slice is an
+// InstancedBufferGeometry whose instances are the copies currently showing that slice;
+// aTile = (index along the slide, slot along the tunnel, face, centre of the slice).
+const MAX_TILES = 256;
+class SliceLayer {
   constructor(material, renderOrder = 0) {
     this.material = material;
     this.renderOrder = renderOrder;
     this.meshes = [];
   }
-  set(geometries) { // one plain BufferGeometry per band
+  set(geometries) { // one plain BufferGeometry per slice
     for (const m of this.meshes) scene.remove(m);
-    this.meshes = geometries.map((g, b) => {
+    this.meshes = geometries.map((g) => {
       const ig = new THREE.InstancedBufferGeometry();
       ig.index = g.index;
       for (const [name, attr] of Object.entries(g.attributes)) ig.setAttribute(name, attr);
-      const tiles = new THREE.InstancedBufferAttribute(new Float32Array(MAX_TILES * 3), 3);
+      const tiles = new THREE.InstancedBufferAttribute(new Float32Array(MAX_TILES * 4), 4);
       tiles.setUsage(THREE.DynamicDrawUsage);
       ig.setAttribute('aTile', tiles);
       ig.instanceCount = 0;
       const mesh = new THREE.Mesh(ig, this.material);
       mesh.frustumCulled = false;
       mesh.renderOrder = this.renderOrder;
-      mesh.userData.band = b;
       scene.add(mesh);
       return mesh;
     });
   }
-  // visible: per band, an array of [i, j] copies
-  update(visible) {
-    this.meshes.forEach((mesh, b) => {
-      const list = visible[b];
+  // perSlice: for each slice, the copies showing it, as [i, j, face, sliceCentre]
+  update(perSlice) {
+    this.meshes.forEach((mesh, k) => {
+      const list = perSlice[k] || [];
       const attr = mesh.geometry.getAttribute('aTile');
       const n = Math.min(list.length, MAX_TILES);
-      for (let k = 0; k < n; k++) attr.setXYZ(k, list[k][0], list[k][1], b);
+      for (let t = 0; t < n; t++) attr.setXYZW(t, list[t][0], list[t][1], list[t][2], list[t][3]);
       attr.needsUpdate = true;
       mesh.geometry.instanceCount = n;
       mesh.visible = n > 0;
     });
   }
 }
-const buildingLayer = new BandLayer(buildingMat);
-const groundLayer = new BandLayer(groundMat);
-const roadLayer = new BandLayer(roadMat, 1);
-const treeLayer = new BandLayer(treeMat);
+const buildingLayer = new SliceLayer(buildingMat);
+const groundLayer = new SliceLayer(groundMat);
+const roadLayer = new SliceLayer(roadMat, 1);
+const treeLayer = new SliceLayer(treeMat);
 
 // cars: one instanced low-poly body driven by the traffic simulation, drawn once per visible tile
 const MAX_CARS = 700;
@@ -584,6 +592,7 @@ function carGeometry() {
   return g;
 }
 const carMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
   vertexShader: SHADERS['fold.glsl'] + SHADERS['car.vert'],
   fragmentShader: LIGHT + SHADERS['car.frag'],
   uniforms: { ...foldUniforms, ...lightUniforms, uNight: nightUniform },
@@ -610,31 +619,65 @@ const peopleMat = new THREE.ShaderMaterial({
   },
 });
 
-// Dynamic layers (cars, people) are drawn once per visible tile: clones share the
-// buffers, and each clone sets the tile uniform right before its draw call.
+// Dynamic layers are split the same way: cars and pedestrians are sorted into the slice
+// they currently stand in, so a copy showing slice k gets exactly that slice's traffic.
+// Clones share those buffers and set the tile uniform right before their draw call.
+const carSlices = [], peopleSlices = [];
+const carColors = new Float32Array(MAX_CARS * 3); // by car, since a car's slot in a slice changes every frame
+function makeAgentSlices(M) {
+  for (const arr of [carSlices, peopleSlices]) arr.length = 0;
+  for (let k = 0; k < M; k++) {
+    const m = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CARS * 16), 16);
+    m.setUsage(THREE.DynamicDrawUsage);
+    const col = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CARS * 3), 3);
+    col.setUsage(THREE.DynamicDrawUsage);
+    carSlices.push({ matrix: m, color: col, count: 0 });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(MAX_PEOPLE * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('aSeed', new THREE.Float32BufferAttribute(new Float32Array(MAX_PEOPLE * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 3000);
+    peopleSlices.push({ geo: g, count: 0 });
+  }
+}
 class TileClones {
-  constructor(make, material) {
+  constructor(make, material, attach) {
     this.material = material;
+    this.attach = attach;
     this.clones = [];
-    for (let k = 0; k < MAX_TILES; k++) {
+    for (let k = 0; k < SURF.agentTiles; k++) {
       const obj = make();
       obj.frustumCulled = false;
       obj.visible = false;
-      obj.onBeforeRender = () => { material.uniforms.uTile.value.set(obj.userData.i, obj.userData.j, -1); material.uniformsNeedUpdate = true; };
+      obj.onBeforeRender = () => {
+        const t = obj.userData.tile;
+        material.uniforms.uTile.value.set(t[0], t[1], t[2], t[3]);
+        material.uniformsNeedUpdate = true;
+      };
       scene.add(obj);
       this.clones.push(obj);
     }
   }
-  update(tiles, sync) { // tiles: array of [i, j]
+  update(tiles) { // tiles: [i, j, face, sliceCentre, sliceIndex]
     this.clones.forEach((obj, k) => {
       const t = tiles[k];
       obj.visible = !!t;
-      if (t) { obj.userData.i = t[0]; obj.userData.j = t[1]; sync?.(obj); }
+      if (t) { obj.userData.tile = t; this.attach(obj, t[4]); }
     });
   }
 }
-const carClones = new TileClones(() => { const m = new THREE.InstancedMesh(cars.geometry, carMat, MAX_CARS); m.instanceMatrix = cars.instanceMatrix; return m; }, carMat);
-const peopleClones = new TileClones(() => new THREE.Points(peopleGeo, peopleMat), peopleMat);
+const carClones = new TileClones(() => new THREE.InstancedMesh(cars.geometry, carMat, MAX_CARS), carMat, (obj, k) => {
+  const slice = carSlices[k];
+  obj.instanceMatrix = slice.matrix;
+  obj.instanceColor = slice.color;
+  obj.count = slice.count;
+  obj.visible = slice.count > 0;
+});
+const peopleClones = new TileClones(() => new THREE.Points(peopleGeo, peopleMat), peopleMat, (obj, k) => {
+  const slice = peopleSlices[k];
+  obj.geometry = slice.geo;
+  slice.geo.setDrawRange(0, slice.count);
+  obj.visible = slice.count > 0;
+});
 
 const skyMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['sky.vert'],
@@ -754,51 +797,65 @@ const frustum = new THREE.Frustum();
 const projView = new THREE.Matrix4();
 const box = new THREE.Box3();
 const corner = new THREE.Vector3();
-const tileState = { boxR: 560, tunnelR: SURF.tunnelR, depth: SURF.depth, visibleBands: [], visibleTiles: [] };
+const tileState = { boxR: 560, tunnelR: SURF.tunnelR, depth: SURF.depth, tiles: [], perSlice: [] };
+
+// which slice of the city a copy shows: a hash of its permanent identity
+function tileSlice(i, j, f, M) {
+  let x = (Math.imul(i + 1013, 374761393) ^ Math.imul(j + 8623, 668265263) ^ Math.imul(f + 127, 2246822519)) >>> 0;
+  x = Math.imul(x ^ (x >>> 13), 1274126177) >>> 0;
+  return ((x ^ (x >>> 16)) >>> 0) % M;
+}
+
 function updateTiles() {
-  const N = state.fold, R = tileState.boxR, bandW = 2 * R / N, L = 2 * R;
+  const N = state.fold, R = tileState.boxR, M = SURF.slices, W = 2 * R / M, L = 2 * R;
   const D = foldUniforms.uTunnelR.value, slide = foldUniforms.uSlide.value, wraps = foldUniforms.uWraps.value;
-  const jmax = Math.ceil(tileState.depth / bandW);
+  const jmax = Math.ceil(tileState.depth / W);
   projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
   frustum.setFromProjectionMatrix(projView);
-  const bands = [], tileSet = new Map();
-  for (let b = 0; b < N; b++) {
-    const th = Math.PI / 2 - 2 * Math.PI * b / N;
+  const perSlice = Array.from({ length: M }, () => []);
+  const tiles = [];
+  for (let f = 0; f < N; f++) {
+    const th = Math.PI / 2 - 2 * Math.PI * f / N;
     const cx = Math.cos(th), cy = Math.sin(th), tx = -Math.sin(th), ty = Math.cos(th);
-    const list = [];
     // m is the slot around the viewer; the index stored travels with the content instead,
-    // so a copy keeps its identity (half turn, skyline, lit windows) as it slides past
+    // so a copy keeps its identity (slice, orientation, skyline) as it slides past
     for (let m = -SURF.sideCopies; m <= SURF.sideCopies; m++) {
       const i = m - wraps;
       for (let j = -jmax; j <= jmax; j++) {
         box.makeEmpty();
         for (let k = 0; k < 8; k++) {
           const u = (k & 1 ? R : -R) + slide + m * L;
-          const v = (k & 2 ? bandW / 2 : -bandW / 2) + j * bandW;
+          const v = (k & 2 ? W / 2 : -W / 2) + j * W;
           const h = k & 4 ? D * SURF.hideH : 0;
           corner.set(cx * (D - h) + tx * u, cy * (D - h) + ty * u, v);
           box.expandByPoint(corner);
         }
-        if (frustum.intersectsBox(box)) { list.push([i, j]); tileSet.set(i + ':' + j, [i, j]); }
+        if (!frustum.intersectsBox(box)) continue;
+        const k = tileSlice(i, j, f, M);
+        const tile = [i, j, f, -R + (k + 0.5) * W, k];
+        perSlice[k].push(tile);
+        box.getCenter(corner);
+        tile.d = corner.lengthSq();
+        tiles.push(tile);
       }
     }
-    bands.push(list);
   }
-  tileState.visibleBands = bands;
-  tileState.visibleTiles = Array.from(tileSet.values());
-  buildingLayer.update(bands); groundLayer.update(bands); roadLayer.update(bands); treeLayer.update(bands);
-  carClones.update(tileState.visibleTiles, (m) => { m.count = cars.count; m.instanceColor = cars.instanceColor; });
-  peopleClones.update(tileState.visibleTiles);
+  tiles.sort((a, b) => a.d - b.d); // traffic and pedestrians only go in the nearest copies
+  tileState.tiles = tiles;
+  tileState.perSlice = perSlice;
+  buildingLayer.update(perSlice); groundLayer.update(perSlice); roadLayer.update(perSlice); treeLayer.update(perSlice);
+  carClones.update(tiles);
+  peopleClones.update(tiles);
 }
 
-// ---------------------------------------------------------------- per-band geometry
-const bandOf = (z, N, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / N)), 0, N - 1);
+// ---------------------------------------------------------------- per-slice geometry
+const sliceOf = (z, M, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / M)), 0, M - 1);
 
 // buildings: whole buildings only, never cut. Hidden when taller than the tunnel allows,
 // when they sit on a band cut, or when they touch the seam where a band repeats.
-function buildingBands(buildings, N, R) {
-  const bandW = 2 * R / N, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH / SURF.maxStretch;
-  const groups = Array.from({ length: N }, () => []);
+function buildingSlices(buildings, M, R) {
+  const sliceW = 2 * R / M, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH / SURF.maxStretch;
+  const groups = Array.from({ length: M }, () => []);
   let hidden = 0;
   for (const bld of buildings) {
     if (bld.h > maxH) { hidden++; continue; }
@@ -807,24 +864,24 @@ function buildingBands(buildings, N, R) {
       const x = bld.pts[i], z = bld.pts[i + 1];
       cz += z;
       if (Math.abs(x) > R - buf || Math.abs(z) > R - buf) { ok = false; break; }
-      const zb = (z + R) % bandW;
-      if (zb < buf || zb > bandW - buf) { ok = false; break; }
+      const zb = (z + R) % sliceW;
+      if (zb < buf || zb > sliceW - buf) { ok = false; break; }
     }
     if (!ok) { hidden++; continue; }
-    groups[bandOf(cz / (bld.pts.length / 2), N, R)].push(bld);
+    groups[sliceOf(cz / (bld.pts.length / 2), M, R)].push(bld);
   }
   return { geos: groups.map(buildCityGeometry), hidden };
 }
 
-// split an indexed geometry into bands, dropping triangles outside the box or across a cut
-function splitByBand(g, N, R) {
+// split an indexed geometry into slices, dropping triangles outside the box or across a cut
+function splitBySlice(g, M, R) {
   const pos = g.getAttribute('position');
   const index = g.index.array;
   const names = Object.keys(g.attributes);
-  const out = Array.from({ length: N }, () => ({ idx: [], remap: new Map() }));
+  const out = Array.from({ length: M }, () => ({ idx: [], remap: new Map() }));
   for (let t = 0; t < index.length; t += 3) {
     const a = index[t], b = index[t + 1], c = index[t + 2];
-    const ba = bandOf(pos.getZ(a), N, R), bb = bandOf(pos.getZ(b), N, R), bc = bandOf(pos.getZ(c), N, R);
+    const ba = sliceOf(pos.getZ(a), M, R), bb = sliceOf(pos.getZ(b), M, R), bc = sliceOf(pos.getZ(c), M, R);
     if (ba !== bb || bb !== bc) continue;
     let inside = true;
     for (const v of [a, b, c]) if (Math.abs(pos.getX(v)) > R || Math.abs(pos.getZ(v)) > R) { inside = false; break; }
@@ -848,12 +905,12 @@ function splitByBand(g, N, R) {
   });
 }
 
-function groundBands(N, R) {
-  const bandW = 2 * R / N;
-  return Array.from({ length: N }, (_, b) => {
-    const g = new THREE.PlaneGeometry(2 * R, bandW, Math.ceil(2 * R / 25), Math.ceil(bandW / 25));
+function groundSlices(M, R) {
+  const sliceW = 2 * R / M;
+  return Array.from({ length: M }, (_, k) => {
+    const g = new THREE.PlaneGeometry(2 * R, sliceW, Math.ceil(2 * R / 25), Math.ceil(sliceW / 25));
     g.rotateX(-Math.PI / 2);
-    g.translate(0, -0.05, -R + (b + 0.5) * bandW);
+    g.translate(0, -0.05, -R + (k + 0.5) * sliceW);
     return g;
   });
 }
@@ -873,12 +930,12 @@ const treeProto = (() => {
   }
   return { pos, nrm, n: pos.length / 3 };
 })();
-function treeBands(treeXZ, count, N, R) {
-  const groups = Array.from({ length: N }, () => []);
+function treeSlices(treeXZ, count, M, R) {
+  const groups = Array.from({ length: M }, () => []);
   for (let k = 0; k < count; k++) {
     const x = treeXZ[2 * k], z = treeXZ[2 * k + 1];
     if (Math.abs(x) > R || Math.abs(z) > R) continue;
-    groups[bandOf(z, N, R)].push(k);
+    groups[sliceOf(z, M, R)].push(k);
   }
   const { pos: P, nrm: Nn, n } = treeProto;
   const m = new THREE.Matrix4(), nm = new THREE.Matrix3(), v = new THREE.Vector3();
@@ -938,7 +995,7 @@ const carDummy = new THREE.Object3D();
 function buildLayers() {
   const c = CITY_DATA[state.cityIndex];
   const entry = decodedCities.get(c.key);
-  const N = state.fold, R = tileState.boxR;
+  const N = state.fold, R = tileState.boxR, M = SURF.slices;
   // the surfaces move away just enough for the tallest building (Taipei 101, 508 m) to fit,
   // then further still as the faces close in around the viewer
   tileState.tunnelR = Math.round(Math.max(SURF.tunnelR, (c.maxH * SURF.maxStretch + 20) / SURF.hideH) * SURF.sidesScale[N]);
@@ -947,10 +1004,12 @@ function buildLayers() {
   lightUniforms.uDepthFade.value = tileState.depth;
   const key = N;
   if (!entry.byN.has(key)) {
-    const { geos, hidden } = buildingBands(entry.buildings, N, R);
-    entry.byN.set(key, { buildings: geos, hidden, roads: splitByBand(entry.roadGeo, N, R), ground: groundBands(N, R), trees: null });
+    const { geos, hidden } = buildingSlices(entry.buildings, M, R);
+    entry.byN.set(key, { buildings: geos, hidden, roads: splitBySlice(entry.roadGeo, M, R), ground: groundSlices(M, R), trees: null });
   }
   const layers = entry.byN.get(key);
+  foldUniforms.uSlices.value = M;
+  makeAgentSlices(M);
   buildingLayer.set(layers.buildings);
   roadLayer.set(layers.roads);
   groundLayer.set(layers.ground);
@@ -958,7 +1017,7 @@ function buildLayers() {
   entry.mask?.then((m) => {
     if (!m || state.cityIndex !== CITY_DATA.indexOf(c) || state.fold !== N) return;
     groundMat.uniforms.uMask.value = m.tex;
-    if (!layers.trees) layers.trees = treeBands(m.trees.xz, m.trees.n, N, R);
+    if (!layers.trees) layers.trees = treeSlices(m.trees.xz, m.trees.n, M, R);
     treeLayer.set(layers.trees);
   });
   $('#stats').textContent = I18N[lang].buildings(c.count - layers.hidden);
@@ -995,11 +1054,11 @@ function loadCity(i) {
   });
   cars.count = traffic.n;
   const taxi = TAXI[c.key] ? new THREE.Color(TAXI[c.key]) : null;
+  const col = new THREE.Color();
   for (let k = 0; k < traffic.n; k++) {
-    const col = taxi && Math.random() < 0.14 ? taxi : new THREE.Color(CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)]);
-    cars.setColorAt(k, col);
+    col.set(taxi && Math.random() < 0.14 ? taxi : CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)]);
+    col.toArray(carColors, k * 3);
   }
-  cars.instanceColor.needsUpdate = true;
 
   // pedestrians use every road, on the sidewalk where there is one
   crowd = makeAgents(entry.roads, MAX_PEOPLE, {
@@ -1136,20 +1195,35 @@ function frame() {
   nightUniform.value = THREE.MathUtils.smoothstep(cur.windowLit, 0.25, 0.7);
   treeMat.uniforms.uBlossomAmt.value = cur.blossomAmt;
 
-  // traffic + pedestrians
-  if (traffic) {
+  // traffic + pedestrians, sorted into the slice of the city they are standing in
+  const M = SURF.slices, R = tileState.boxR;
+  if (traffic && carSlices.length === M) {
+    for (const s of carSlices) s.count = 0;
     traffic.step(dt, (k, x, z, hx, hz) => {
+      const slice = carSlices[sliceOf(z, M, R)];
+      if (slice.count >= MAX_CARS) return;
       carDummy.position.set(x, 0, z);
       carDummy.rotation.y = Math.atan2(-hz, hx);
       carDummy.updateMatrix();
-      cars.setMatrixAt(k, carDummy.matrix);
+      carDummy.matrix.toArray(slice.matrix.array, slice.count * 16);
+      slice.color.array.set(carColors.subarray(k * 3, k * 3 + 3), slice.count * 3);
+      slice.count++;
     });
-    cars.instanceMatrix.needsUpdate = true;
+    for (const s of carSlices) { s.matrix.needsUpdate = true; s.color.needsUpdate = true; }
   }
-  if (crowd) {
-    const arr = peopleGeo.getAttribute('position').array;
-    crowd.step(dt, (k, x, z) => { arr[3 * k] = x; arr[3 * k + 1] = 0.3; arr[3 * k + 2] = z; });
-    peopleGeo.getAttribute('position').needsUpdate = true;
+  if (crowd && peopleSlices.length === M) {
+    for (const s of peopleSlices) s.count = 0;
+    const seeds = peopleGeo.getAttribute('aSeed').array;
+    crowd.step(dt, (k, x, z) => {
+      const slice = peopleSlices[sliceOf(z, M, R)];
+      if (slice.count >= MAX_PEOPLE) return;
+      const pos = slice.geo.getAttribute('position').array, sd = slice.geo.getAttribute('aSeed').array;
+      const o = slice.count * 3;
+      pos[o] = x; pos[o + 1] = 0.3; pos[o + 2] = z;
+      sd[o] = seeds[3 * k]; sd[o + 1] = seeds[3 * k + 1]; sd[o + 2] = seeds[3 * k + 2];
+      slice.count++;
+    });
+    for (const s of peopleSlices) { s.geo.getAttribute('position').needsUpdate = true; s.geo.getAttribute('aSeed').needsUpdate = true; }
   }
   postMat.uniforms.uSaturation.value = cur.saturation;
   postMat.uniforms.uVignette.value = cur.vignette;

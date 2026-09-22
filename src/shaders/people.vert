@@ -9,7 +9,7 @@ varying vec3 vWorld;
 
 void main() {
   float height = 1.7 + 0.35 * aSeed.z;
-  vec3 folded = mirrorFold(position, vec3(uTile.xy, -1.0));
+  vec3 folded = mirrorFold(position, uTile);
   vec4 mv = viewMatrix * vec4(folded, 1.0);
   gl_Position = projectionMatrix * mv;
   // project the figure's height into device pixels

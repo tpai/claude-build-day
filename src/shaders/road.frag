@@ -8,6 +8,7 @@ varying float vAcross;
 varying float vAlong;
 varying float vWidth;
 varying float vCls;
+varying float vTileR;
 
 void main() {
   float cls = mod(vCls, 16.0);
@@ -29,8 +30,8 @@ void main() {
     float sidewalkW = cls < 2.5 ? 0.0 : min(1.8 + 0.25 * cls, vWidth * 0.22);
     float halfW = vWidth * 0.5;
     float roadHalf = halfW - sidewalkW;
-    vec3 asphalt = vec3(0.17, 0.17, 0.18) * (0.9 + 0.2 * hash21(floor(vFlat * 1.7)));
-    vec3 paving = vec3(0.52, 0.50, 0.47) * (0.94 + 0.06 * hash21(floor(vec2(vAlong, xm) * 0.8)));
+    vec3 asphalt = vec3(0.17, 0.17, 0.18) * (0.75 + 0.5 * vTileR) * (0.9 + 0.2 * hash21(floor(vFlat * 1.7)));
+    vec3 paving = vec3(0.52, 0.50, 0.47) * (0.85 + 0.3 * fract(vTileR * 5.0)) * (0.94 + 0.06 * hash21(floor(vec2(vAlong, xm) * 0.8)));
     float sidewalk = smoothstep(roadHalf - aa, roadHalf + aa, xm) * step(0.5, sidewalkW);
     float kerb = smoothstep(roadHalf - 0.35 - aa, roadHalf - 0.35, xm) * (1.0 - sidewalk) * step(0.5, sidewalkW);
     c = mix(asphalt, paving, sidewalk);

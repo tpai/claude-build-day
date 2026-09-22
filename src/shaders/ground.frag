@@ -8,6 +8,7 @@ uniform sampler2D uMask;   // R = water, G = parks, over the whole ground plane
 uniform float uGroundSize;
 varying vec3 vWorld;
 varying vec2 vFlat;
+varying float vTileR;
 
 // value noise for patches of soil / lawn between the blocks
 float vnoise(vec2 p) {
@@ -25,10 +26,10 @@ void main() {
   float green = smoothstep(0.4, 0.6, m.g) * (1.0 - water);
 
   // block interiors: mostly paved courtyards with patches of planting
-  vec3 paved = vec3(0.36, 0.35, 0.34);
+  vec3 paved = vec3(0.36, 0.35, 0.34) * (0.85 + 0.3 * vTileR);
   vec3 c = mix(paved, uGroundBase, 0.3 + 0.5 * n1) * (0.88 + 0.12 * n2);
   // parks: lawn with mown stripes and a worn path or two
-  vec3 grass = uGrass * (0.8 + 0.3 * vnoise(vFlat * 0.15)) * (0.92 + 0.08 * step(0.5, fract(vFlat.x / 9.0)));
+  vec3 grass = uGrass * (0.75 + 0.45 * fract(vTileR * 3.0)) * (0.8 + 0.3 * vnoise(vFlat * 0.15)) * (0.92 + 0.08 * step(0.5, fract(vFlat.x / 9.0)));
   grass = mix(grass, grass * 0.7, smoothstep(0.55, 0.7, m.g) * 0.15); // slightly darker deep inside
   c = mix(c, grass, green);
   // paving inside blocks: a faint slab grid, only near the viewer
