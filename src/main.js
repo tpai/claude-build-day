@@ -453,6 +453,9 @@ const SURF = {
   buffer: 6,        // buildings this close to a band cut or the tile seam are hidden (m)
   depth: 1100,      // how far along the tunnel the copies reach (m)
   sideCopies: 2,    // copies either side along the slide direction
+  // parallel faces sit opposite each other and never crowd; three or more close in
+  // around the viewer, so the tunnel widens with the number of faces
+  sidesScale: [1, 1, 1, 1.35, 1.6, 1.85, 2.1],
 };
 const foldUniforms = {
   uTime: { value: 0 },
@@ -931,6 +934,12 @@ function buildLayers() {
   const c = CITY_DATA[state.cityIndex];
   const entry = decodedCities.get(c.key);
   const N = state.fold, R = tileState.boxR;
+  // the surfaces move away just enough for the tallest building (Taipei 101, 508 m) to fit,
+  // then further still as the faces close in around the viewer
+  tileState.tunnelR = Math.round(Math.max(SURF.tunnelR, (c.maxH + 20) / SURF.hideH) * SURF.sidesScale[N]);
+  // a wider tunnel needs longer copies and thinner fog to keep the same sense of depth
+  tileState.depth = Math.max(SURF.depth, Math.round(tileState.tunnelR * 2.2));
+  lightUniforms.uDepthFade.value = tileState.depth;
   const key = N;
   if (!entry.byN.has(key)) {
     const { geos, hidden } = buildingBands(entry.buildings, N, R);
@@ -962,10 +971,6 @@ function loadCity(i) {
   tileState.boxR = Math.round((c.radius || 800) * 0.7);
   foldUniforms.uBoxR.value = tileState.boxR;
   // the surfaces move away just enough for the tallest building (Taipei 101, 508 m) to fit
-  tileState.tunnelR = Math.max(SURF.tunnelR, Math.ceil((c.maxH + 20) / SURF.hideH));
-  // a wider tunnel needs longer copies and thinner fog to keep the same sense of depth
-  tileState.depth = Math.max(SURF.depth, Math.round(tileState.tunnelR * 2.2));
-  lightUniforms.uDepthFade.value = tileState.depth;
 
   groundMat.uniforms.uMask.value = emptyMask;
   if (!entry.mask) entry.mask = loadMask(c.areas).then((m) => ({ ...m, trees: scatterTrees(m, MAX_TREES) })).catch((e) => { console.warn('area mask failed', e); return null; });
