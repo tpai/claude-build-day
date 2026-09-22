@@ -453,6 +453,7 @@ const SURF = {
   buffer: 6,        // buildings this close to a band cut or the tile seam are hidden (m)
   depth: 1100,      // how far along the tunnel the copies reach (m)
   sideCopies: 2,    // copies either side along the slide direction
+  maxStretch: 1.08, // the tallest a copy can make its buildings (see tileHeight in fold.glsl)
   // parallel faces sit opposite each other and never crowd; three or more close in
   // around the viewer, so the tunnel widens with the number of faces
   sidesScale: [1, 1, 1, 1.35, 1.6, 1.85, 2.1],
@@ -463,6 +464,7 @@ const foldUniforms = {
   uBoxR: { value: 560 },
   uTunnelR: { value: SURF.tunnelR },
   uSlide: { value: 0 },
+  uWraps: { value: 0 },
   uTile: { value: new THREE.Vector3(0, 0, -1) },
 };
 const lightUniforms = {
@@ -755,7 +757,7 @@ const corner = new THREE.Vector3();
 const tileState = { boxR: 560, tunnelR: SURF.tunnelR, depth: SURF.depth, visibleBands: [], visibleTiles: [] };
 function updateTiles() {
   const N = state.fold, R = tileState.boxR, bandW = 2 * R / N, L = 2 * R;
-  const D = foldUniforms.uTunnelR.value, slide = foldUniforms.uSlide.value;
+  const D = foldUniforms.uTunnelR.value, slide = foldUniforms.uSlide.value, wraps = foldUniforms.uWraps.value;
   const jmax = Math.ceil(tileState.depth / bandW);
   projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
   frustum.setFromProjectionMatrix(projView);
@@ -764,17 +766,20 @@ function updateTiles() {
     const th = Math.PI / 2 - 2 * Math.PI * b / N;
     const cx = Math.cos(th), cy = Math.sin(th), tx = -Math.sin(th), ty = Math.cos(th);
     const list = [];
-    for (let i = -SURF.sideCopies; i <= SURF.sideCopies; i++) {
+    // m is the slot around the viewer; the index stored travels with the content instead,
+    // so a copy keeps its identity (half turn, skyline, lit windows) as it slides past
+    for (let m = -SURF.sideCopies; m <= SURF.sideCopies; m++) {
+      const i = m - wraps;
       for (let j = -jmax; j <= jmax; j++) {
         box.makeEmpty();
         for (let k = 0; k < 8; k++) {
-          const u = (k & 1 ? R : -R) + slide + i * L;
+          const u = (k & 1 ? R : -R) + slide + m * L;
           const v = (k & 2 ? bandW / 2 : -bandW / 2) + j * bandW;
           const h = k & 4 ? D * SURF.hideH : 0;
           corner.set(cx * (D - h) + tx * u, cy * (D - h) + ty * u, v);
           box.expandByPoint(corner);
         }
-        if (frustum.intersectsBox(box)) { list.push([i, j]); tileSet.set(i * 1000 + j, [i, j]); }
+        if (frustum.intersectsBox(box)) { list.push([i, j]); tileSet.set(i + ':' + j, [i, j]); }
       }
     }
     bands.push(list);
@@ -792,7 +797,7 @@ const bandOf = (z, N, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / 
 // buildings: whole buildings only, never cut. Hidden when taller than the tunnel allows,
 // when they sit on a band cut, or when they touch the seam where a band repeats.
 function buildingBands(buildings, N, R) {
-  const bandW = 2 * R / N, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH;
+  const bandW = 2 * R / N, buf = SURF.buffer, maxH = tileState.tunnelR * SURF.hideH / SURF.maxStretch;
   const groups = Array.from({ length: N }, () => []);
   let hidden = 0;
   for (const bld of buildings) {
@@ -936,7 +941,7 @@ function buildLayers() {
   const N = state.fold, R = tileState.boxR;
   // the surfaces move away just enough for the tallest building (Taipei 101, 508 m) to fit,
   // then further still as the faces close in around the viewer
-  tileState.tunnelR = Math.round(Math.max(SURF.tunnelR, (c.maxH + 20) / SURF.hideH) * SURF.sidesScale[N]);
+  tileState.tunnelR = Math.round(Math.max(SURF.tunnelR, (c.maxH * SURF.maxStretch + 20) / SURF.hideH) * SURF.sidesScale[N]);
   // a wider tunnel needs longer copies and thinner fog to keep the same sense of depth
   tileState.depth = Math.max(SURF.depth, Math.round(tileState.tunnelR * 2.2));
   lightUniforms.uDepthFade.value = tileState.depth;
@@ -1114,7 +1119,9 @@ function frame() {
   postMat.uniforms.uFade.value = state.fade * ease;
 
   foldUniforms.uTime.value = elapsed;
-  foldUniforms.uSlide.value = (SURF.speed * elapsed) % (2 * tileState.boxR);
+  const slid = SURF.speed * elapsed, period = 2 * tileState.boxR;
+  foldUniforms.uSlide.value = slid % period;
+  foldUniforms.uWraps.value = Math.floor(slid / period);
 
   // day / night interpolation
   state.timeBlend = Math.min(1, state.timeBlend + dt / 1.6);

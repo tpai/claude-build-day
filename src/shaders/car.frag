@@ -5,10 +5,12 @@ varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec3 vLocal;   // car space: +x forward, +y up, +z right. Body ~4.4 x 1.9 m
 varying vec3 vColor;
+varying float vTileR;
 
 void main() {
   vec3 n = normalize(vNormal);
-  vec3 base = vColor;
+  // the same traffic wears different paint in each copy
+  vec3 base = mix(vColor, vTileR < 0.5 ? vColor.gbr : vColor.brg, step(0.34, vTileR)) * (0.85 + 0.3 * vTileR);
   // glazing on the cabin
   float cabin = step(1.25, vLocal.y) * (1.0 - step(0.98, n.y));
   base = mix(base, vec3(0.10, 0.13, 0.17), cabin);

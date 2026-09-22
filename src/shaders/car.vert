@@ -2,6 +2,7 @@ varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec3 vLocal;
 varying vec3 vColor;
+varying float vTileR;
 
 void main() {
   vec3 wp = (instanceMatrix * vec4(position, 1.0)).xyz;
@@ -14,5 +15,6 @@ void main() {
   vWorld = folded;
   vLocal = position;
   vColor = instanceColor;
+  vTileR = tileRand(tile + vec3(7.7, 1.3, 3.9));
   gl_Position = projectionMatrix * viewMatrix * vec4(folded, 1.0);
 }

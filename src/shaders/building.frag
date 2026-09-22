@@ -11,15 +11,17 @@ varying vec2 vFlat;    // unfolded world xz, used for roof detail
 varying float vRand;
 varying float vHeight;
 varying float vWall;
+varying float vTileR;   // this copy's identity: shifts the windows that are lit and the tint
 
 const float FLOOR = 3.4;
 
 // Facade styles picked per building from vRand:
 //   0 punched windows in masonry, 1 glass curtain wall, 2 horizontal strip windows
 void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint, vec3 n) {
-  float style = vRand < 0.42 ? 0.0 : (vRand < 0.72 ? 1.0 : 2.0);
-  float r2 = fract(vRand * 41.7);
-  float r3 = fract(vRand * 97.3);
+  float r = fract(vRand + vTileR);
+  float style = r < 0.42 ? 0.0 : (r < 0.72 ? 1.0 : 2.0);
+  float r2 = fract(vRand * 41.7 + vTileR);
+  float r3 = fract(vRand * 97.3 + vTileR * 3.1);
   float cellW = 2.6 + r2 * 1.8;
   vec2 g = vec2(vUv.x / cellW, vUv.y / FLOOR);
   vec2 id = floor(g);
@@ -31,9 +33,9 @@ void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint,
 
   glass = 0.0; lit = 0.0;
   glassTint = vec3(0.0);
-  float h = hash21(id + vRand * 97.0);
+  float h = hash21(id + vRand * 97.0 + vTileR * 53.0);
   // some buildings are mostly dark, some mostly lit; floors differ too (offices vs. empty)
-  float floorMood = 0.7 + 0.6 * hash21(vec2(floorIdx, vRand * 31.0));
+  float floorMood = 0.7 + 0.6 * hash21(vec2(floorIdx, vRand * 31.0 + vTileR * 17.0));
   float litP = clamp(uWindowLit * (0.35 + 1.3 * fract(vRand * 5.7)) * floorMood, 0.0, 0.95);
 
   if (style < 0.5) {
@@ -47,7 +49,7 @@ void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint,
     // brick / render bands every floor, slightly darker joints
     base *= 1.0 - 0.08 * step(f.y, 0.06);
     base *= 1.0 - 0.06 * step(f.x, 0.04) * step(0.5, r3);
-    lit = glass * step(1.0 - litP, h) * (0.7 + 0.3 * hash21(id * 1.7 + vRand));
+    lit = glass * step(1.0 - litP, h) * (0.7 + 0.3 * hash21(id * 1.7 + vRand + vTileR));
   } else if (style < 1.5) {
     // full glass curtain wall with mullions; whole panels light up per office
     vec2 gm = vec2(vUv.x / 1.6, vUv.y / FLOOR);
@@ -60,7 +62,7 @@ void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint,
     glassTint = mix(vec3(0.09, 0.13, 0.18), vec3(0.05, 0.07, 0.09), spandrel);
     base = mix(base, base * 0.55, 1.0 - glass); // metal mullions are dark
     vec2 office = floor(vec2(vUv.x / (cellW * 2.0), vUv.y / FLOOR));
-    float ho = hash21(office + vRand * 53.0);
+    float ho = hash21(office + vRand * 53.0 + vTileR * 29.0);
     lit = glass * (1.0 - spandrel) * step(1.0 - litP * 1.15, ho) * (0.5 + 0.3 * hash21(office * 2.3 + vRand));
   } else {
     // horizontal ribbon windows between concrete spandrels
@@ -70,7 +72,7 @@ void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint,
     glassTint = vec3(0.11, 0.13, 0.16);
     base *= 1.0 - 0.1 * step(f.y, 0.3) * step(0.24, f.y); // shadow line under the band
     vec2 seg = vec2(floor(vUv.x / (cellW * 1.5)), floorIdx);
-    float hs = hash21(seg + vRand * 71.0);
+    float hs = hash21(seg + vRand * 71.0 + vTileR * 41.0);
     lit = glass * step(1.0 - litP, hs) * (0.6 + 0.4 * hash21(seg * 1.3 + vRand));
   }
 
@@ -80,7 +82,7 @@ void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint,
     float pier = step(fract(vUv.x / 6.5), 0.08); // structural piers between shops
     shop *= 1.0 - pier;
     float shopId = floor(vUv.x / 6.5);
-    float hsId = hash21(vec2(shopId, vRand * 13.0));
+    float hsId = hash21(vec2(shopId, vRand * 13.0 + vTileR * 7.0));
     glass = max(glass * (1.0 - step(vUv.y, 4.2)), shop);
     glassTint = mix(glassTint, vec3(0.13, 0.12, 0.10), shop);
     float awning = step(3.1, vUv.y) * step(vUv.y, 3.75) * (1.0 - pier) * step(0.45, hsId);
@@ -95,8 +97,8 @@ void facade(inout vec3 base, out float glass, out float lit, out vec3 glassTint,
 void main() {
   vec3 n = normalize(vNormal);
   // per-building hue: beige, brick, cool grey, blue-grey ...
-  vec3 hue = 0.5 + 0.5 * cos(6.2831 * (fract(vRand * 3.1) + vec3(0.0, 0.1, 0.2)));
-  vec3 base = uBuildingTint * (0.68 + 0.4 * vRand) * mix(vec3(1.0), hue, 0.22);
+  vec3 hue = 0.5 + 0.5 * cos(6.2831 * (fract(vRand * 3.1 + vTileR * 0.7) + vec3(0.0, 0.1, 0.2)));
+  vec3 base = uBuildingTint * (0.68 + 0.4 * vRand) * mix(vec3(1.0), hue, 0.22) * (0.9 + 0.2 * vTileR);
   vec3 c;
 
   if (vWall > 0.5) {
@@ -116,7 +118,7 @@ void main() {
     base *= 0.86 + 0.08 * hash21(floor(vFlat * 0.9));
     vec2 cell = floor(vFlat / 4.5);
     vec2 cf = fract(vFlat / 4.5);
-    float hc = hash21(cell + vRand * 7.0);
+    float hc = hash21(cell + vRand * 7.0 + vTileR * 23.0);
     float unit = step(0.9 - 0.06 * step(20.0, vHeight), hc) * step(0.25, cf.x) * step(cf.x, 0.75) * step(0.3, cf.y) * step(cf.y, 0.7) * step(12.0, vHeight);
     // HVAC boxes: lighter top, shaded side edge
     vec3 unitCol = uBuildingTint * (0.7 + 0.3 * fract(hc * 9.0)) * (1.0 - 0.35 * step(cf.y, 0.38));

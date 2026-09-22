@@ -9,17 +9,22 @@ varying vec2 vFlat;
 varying float vRand;
 varying float vHeight;
 varying float vWall;
+varying float vTileR;
 
 void main() {
-  vec3 folded = mirrorFold(position, aTile);
-  vec3 folded2 = mirrorFold(position + normal * 0.5, aTile);
+  // each copy of a band gets its own skyline: the same buildings, a little taller or shorter
+  float hs = tileHeight(aTile);
+  vec3 p = vec3(position.x, position.y * hs, position.z);
+  vec3 folded = mirrorFold(p, aTile);
+  vec3 folded2 = mirrorFold(p + normal * 0.5, aTile);
   vec3 fn = folded2 - folded;
   vNormal = length(fn) > 1e-5 ? normalize(fn) : normal;
   vWorld = folded;
   vFlat = position.xz;
-  vUv = uv;
+  vUv = vec2(uv.x, uv.y * hs);
   vRand = aRand;
-  vHeight = aHeight;
+  vHeight = aHeight * hs;
+  vTileR = tileRand(aTile + vec3(5.1, 2.3, 8.7));
   vWall = aWall;
   gl_Position = projectionMatrix * viewMatrix * vec4(folded, 1.0);
 }
