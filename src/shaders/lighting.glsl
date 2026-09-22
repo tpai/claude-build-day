@@ -1,4 +1,4 @@
-// Shared lighting + fog for every folded surface. Included after fold.glsl in
+// Shared lighting + fog for every surface. Included after fold.glsl in
 // fragment shaders that use it.
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
@@ -7,6 +7,7 @@ uniform vec3 uSkyColor;
 uniform vec3 uGroundColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform float uDepthFade;   // distance along the tunnel where the surfaces fade out
 
 float hash21(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -24,13 +25,7 @@ vec3 shade(vec3 n) {
 vec3 applyFog(vec3 c, vec3 world) {
   float dist = length(uCamPos - world);
   float fog = 1.0 - exp(-dist * uFogDensity);
+  // the tunnel has a finite number of copies: hide its ends in fog
+  fog = max(fog, smoothstep(0.7 * uDepthFade, 0.98 * uDepthFade, abs(world.z)));
   return mix(c, uFogColor, fog);
-}
-
-// mirror-dimension iridescent sheen
-vec3 iridescence(vec3 world, vec3 n, float k, float time) {
-  vec3 vdir = normalize(uCamPos - world);
-  float fres = pow(1.0 - max(dot(n, vdir), 0.0), 3.0);
-  vec3 irid = 0.5 + 0.5 * cos(6.2831 * (world.y * 0.0025 + world.x * 0.0007 + vec3(0.0, 0.33, 0.67)) + time * 0.4);
-  return k * irid * (0.12 + 0.9 * fres);
 }

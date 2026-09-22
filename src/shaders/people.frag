@@ -1,6 +1,7 @@
 precision highp float;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform float uDepthFade;
 uniform vec3 uCamPos;
 uniform vec3 uSkyColor;
 uniform vec3 uSunColor;
@@ -42,6 +43,7 @@ void main() {
   vec3 c = dh < dt && dh < dl ? skin : (dl < dt && dl < da ? trousers : shirt);
   c *= mix(uSkyColor, uSunColor, 0.4) * 0.9 + 0.25;
   float dist = length(uCamPos - vWorld);
-  c = mix(c, uFogColor, 1.0 - exp(-dist * uFogDensity));
+  float fog = max(1.0 - exp(-dist * uFogDensity), smoothstep(0.7 * uDepthFade, 0.98 * uDepthFade, abs(vWorld.z)));
+  c = mix(c, uFogColor, fog);
   gl_FragColor = vec4(c, a);
 }

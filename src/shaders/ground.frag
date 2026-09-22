@@ -1,5 +1,4 @@
 precision highp float;
-uniform float uIntensity;
 uniform float uTime;
 uniform vec3 uGroundBase;
 uniform vec3 uGridColor;
@@ -20,7 +19,8 @@ float vnoise(vec2 p) {
 void main() {
   float radial = smoothstep(1100.0, 300.0, length(vFlat));
   float n1 = vnoise(vFlat * 0.045), n2 = vnoise(vFlat * 0.2);
-  vec2 m = texture2D(uMask, vFlat / uGroundSize + 0.5).rg;
+  vec2 muv = vFlat / uGroundSize + 0.5;
+  vec2 m = texture2D(uMask, muv).rg * step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
   float water = smoothstep(0.4, 0.6, m.r);
   float green = smoothstep(0.4, 0.6, m.g) * (1.0 - water);
 
@@ -34,7 +34,7 @@ void main() {
   // paving inside blocks: a faint slab grid, only near the viewer
   vec2 g = abs(fract(vFlat / 50.0 - 0.5) - 0.5) / fwidth(vFlat / 50.0);
   float line = 1.0 - min(min(g.x, g.y), 1.0);
-  c += uGridColor * line * (0.06 + 0.7 * uIntensity) * radial * (1.0 - green);
+  c += uGridColor * line * 0.06 * radial * (1.0 - green);
   c *= shade(vec3(0.0, 1.0, 0.0));
 
   // water: sky reflection, moving ripples, sun glitter, lighter shallows near the bank
@@ -47,9 +47,6 @@ void main() {
   waterCol = mix(waterCol * 1.15, waterCol, smoothstep(0.55, 0.9, m.r));
   c = mix(c, waterCol, water);
 
-  // iridescent sheen when folded
-  vec3 irid = 0.5 + 0.5 * cos(6.2831 * (length(vFlat) * 0.002 + vec3(0.0, 0.33, 0.67)) - uTime * 0.3);
-  c += uIntensity * irid * 0.05 * radial;
   c = applyFog(c, vWorld);
   gl_FragColor = vec4(c, 1.0);
 }

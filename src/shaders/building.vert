@@ -1,6 +1,7 @@
 attribute float aRand;
 attribute float aHeight;
 attribute float aWall;
+attribute vec3 aTile;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec2 vUv;
@@ -10,8 +11,8 @@ varying float vHeight;
 varying float vWall;
 
 void main() {
-  vec3 folded = mirrorFold(position);
-  vec3 folded2 = mirrorFold(position + normal * 0.5);
+  vec3 folded = mirrorFold(position, aTile);
+  vec3 folded2 = mirrorFold(position + normal * 0.5, aTile);
   vec3 fn = folded2 - folded;
   vNormal = length(fn) > 1e-5 ? normalize(fn) : normal;
   vWorld = folded;

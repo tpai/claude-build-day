@@ -3,9 +3,9 @@ uniform vec3 uSkyTop;
 uniform vec3 uSkyBottom;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
-uniform float uIntensity;
 uniform float uTime;
 uniform float uNight;
+uniform vec3 uFogColor;
 varying vec3 vDir;
 
 float hash21(vec2 p) {
@@ -29,9 +29,7 @@ void main() {
     float star = step(0.92, h) * smoothstep(0.09, 0.0, length(f)) * (0.55 + 0.45 * sin(uTime * 2.5 + h * 200.0));
     c += star * uNight * smoothstep(0.02, 0.25, d.y) * vec3(0.85, 0.9, 1.0) * (0.6 + 0.6 * fract(h * 13.0));
   }
-  // faint aurora-like bands in the mirror dimension
-  float band = sin(d.x * 18.0 + d.y * 12.0 + uTime * 0.35) * sin(d.z * 14.0 - uTime * 0.2);
-  vec3 irid = 0.5 + 0.5 * cos(6.2831 * (band * 0.25 + vec3(0.0, 0.33, 0.67)) + uTime * 0.2);
-  c += uIntensity * irid * 0.08 * smoothstep(-0.1, 0.5, d.y);
+  // the tunnel's open ends look into fog
+  c = mix(c, uFogColor, smoothstep(0.35, 0.8, abs(d.z)));
   gl_FragColor = vec4(c, 1.0);
 }

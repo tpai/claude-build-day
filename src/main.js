@@ -9,23 +9,25 @@ const loadingText = $('#loadingText');
 // ---------------------------------------------------------------- i18n
 const I18N = {
   zh: {
-    city: '城市', time: '時段', mirror: '鏡像強度',
-    hint: '拖曳旋轉 · 滾輪縮放 · 1–5 切城市 · Q/W 切日夜 · H 隱藏面板',
+    city: '城市', time: '時段', fold: '切面',
+    hint: '拖曳環視 · 滾輪調視角 · 1–5 切城市 · Q/W 切日夜 · A–G 切切面 · H 隱藏面板',
+    folds: ['∥ 平行', '△ 三角', '□ 四角', '⬠ 五角', '⬡ 六角'],
     lang: 'EN', attribution: '© OpenStreetMap 貢獻者',
     times: ['白天', '夜晚'],
     buildings: (n) => `${n} 棟建築`,
     loading: '正在展開城市…',
   },
   en: {
-    city: 'City', time: 'Time', mirror: 'Mirror',
-    hint: 'Drag to orbit · Scroll to zoom · 1–5 cities · Q/W day/night · H hides panel',
+    city: 'City', time: 'Time', fold: 'Faces',
+    hint: 'Drag to look around · Scroll for field of view · 1–5 cities · Q/W day/night · A–G faces · H hides panel',
+    folds: ['∥ Parallel', '△ Triangle', '□ Square', '⬠ Pentagon', '⬡ Hexagon'],
     lang: '繁中', attribution: '© OpenStreetMap contributors',
     times: ['Day', 'Night'],
     buildings: (n) => `${n} buildings`,
     loading: 'Unfolding the city…',
   },
 };
-// URL hash overrides, e.g. #city=2&time=night&mirror=0.6&lang=en
+// URL hash overrides, e.g. #city=2&time=night&fold=6&lang=en
 const HASH = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
 let lang = HASH.lang === 'en' || HASH.lang === 'zh' ? HASH.lang : (/^zh/i.test(navigator.language) ? 'zh' : 'en');
 
@@ -440,14 +442,25 @@ function scatterTrees(mask, max) {
 
 // ---------------------------------------------------------------- scene
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 1, 12000);
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 1, 12000);
+camera.rotation.order = 'YXZ';
 
+// the mirror dimension: N infinite city surfaces around the viewer
+const SURF = {
+  tunnelR: 260,     // distance from the viewer to each surface (m)
+  hideH: 0.8,       // buildings taller than this fraction of tunnelR are hidden
+  speed: 12,        // sideways slide (m/s)
+  buffer: 6,        // buildings this close to a band cut or the tile seam are hidden (m)
+  depth: 1100,      // how far along the tunnel the copies reach (m)
+  sideCopies: 2,    // copies either side along the slide direction
+};
 const foldUniforms = {
-  uIntensity: { value: 0 },
   uTime: { value: 0 },
-  uCamAz: { value: 0 },
-  uCamDist: { value: 700 },
-  uCurlR: { value: 520 },
+  uSides: { value: 4 },
+  uBoxR: { value: 560 },
+  uTunnelR: { value: SURF.tunnelR },
+  uSlide: { value: 0 },
+  uTile: { value: new THREE.Vector3(0, 0, -1) },
 };
 const lightUniforms = {
   uCamPos: { value: new THREE.Vector3() },
@@ -457,7 +470,9 @@ const lightUniforms = {
   uGroundColor: { value: cur.groundLight },
   uFogColor: { value: cur.fog },
   uFogDensity: { value: 0.0008 },
+  uDepthFade: { value: SURF.depth },
 };
+const nightUniform = { value: 0 };
 
 const LIGHT = SHADERS['lighting.glsl'];
 const buildingMat = new THREE.ShaderMaterial({
@@ -470,10 +485,6 @@ const buildingMat = new THREE.ShaderMaterial({
     uWindowLit: { value: 0.2 },
   },
 });
-const cityMesh = new THREE.Mesh(new THREE.BufferGeometry(), buildingMat);
-cityMesh.frustumCulled = false;
-scene.add(cityMesh);
-
 const groundMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['fold.glsl'] + SHADERS['ground.vert'],
   fragmentShader: LIGHT + SHADERS['ground.frag'],
@@ -490,27 +501,65 @@ const groundMat = new THREE.ShaderMaterial({
 const emptyMask = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
 emptyMask.needsUpdate = true;
 groundMat.uniforms.uMask.value = emptyMask;
-const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 104, 104);
-groundGeo.rotateX(-Math.PI / 2);
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.position.y = -0.05;
-ground.frustumCulled = false;
-scene.add(ground);
-
-// streets
-const nightUniform = { value: 0 };
 const roadMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['fold.glsl'] + SHADERS['road.vert'],
   fragmentShader: LIGHT + SHADERS['road.frag'],
   depthWrite: false, // ribbons overlap at junctions; the depth test against ground/buildings is enough
   uniforms: { ...foldUniforms, ...lightUniforms, uNight: nightUniform, uWindowColor: { value: cur.windowColor } },
 });
-const roadMesh = new THREE.Mesh(new THREE.BufferGeometry(), roadMat);
-roadMesh.frustumCulled = false;
-roadMesh.renderOrder = 1;
-scene.add(roadMesh);
+const treeMat = new THREE.ShaderMaterial({
+  vertexShader: SHADERS['fold.glsl'] + SHADERS['tree.vert'],
+  fragmentShader: LIGHT + SHADERS['tree.frag'],
+  uniforms: { ...foldUniforms, ...lightUniforms, uCanopy: { value: cur.canopy }, uBlossom: { value: cur.blossom }, uBlossomAmt: { value: 0 } },
+});
 
-// cars: one instanced low-poly body, matrices updated from the traffic simulation
+// Static city layers are cut into one geometry per band. Each band is an
+// InstancedBufferGeometry whose instances are the visible copies (tiles) of
+// that band on its surface; aTile = (copy along slide, copy along tunnel, band).
+const MAX_TILES = (2 * SURF.sideCopies + 1) * 41;
+class BandLayer {
+  constructor(material, renderOrder = 0) {
+    this.material = material;
+    this.renderOrder = renderOrder;
+    this.meshes = [];
+  }
+  set(geometries) { // one plain BufferGeometry per band
+    for (const m of this.meshes) scene.remove(m);
+    this.meshes = geometries.map((g, b) => {
+      const ig = new THREE.InstancedBufferGeometry();
+      ig.index = g.index;
+      for (const [name, attr] of Object.entries(g.attributes)) ig.setAttribute(name, attr);
+      const tiles = new THREE.InstancedBufferAttribute(new Float32Array(MAX_TILES * 3), 3);
+      tiles.setUsage(THREE.DynamicDrawUsage);
+      ig.setAttribute('aTile', tiles);
+      ig.instanceCount = 0;
+      const mesh = new THREE.Mesh(ig, this.material);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = this.renderOrder;
+      mesh.userData.band = b;
+      scene.add(mesh);
+      return mesh;
+    });
+  }
+  // visible: per band, an array of [i, j] copies
+  update(visible) {
+    this.meshes.forEach((mesh, b) => {
+      const list = visible[b];
+      const attr = mesh.geometry.getAttribute('aTile');
+      const n = Math.min(list.length, MAX_TILES);
+      for (let k = 0; k < n; k++) attr.setXYZ(k, list[k][0], list[k][1], b);
+      attr.needsUpdate = true;
+      mesh.geometry.instanceCount = n;
+      mesh.visible = n > 0;
+    });
+  }
+}
+const buildingLayer = new BandLayer(buildingMat);
+const groundLayer = new BandLayer(groundMat);
+const roadLayer = new BandLayer(roadMat, 1);
+const treeLayer = new BandLayer(treeMat);
+
+// cars: one instanced low-poly body driven by the traffic simulation, drawn once per visible tile
 const MAX_CARS = 700;
 function carGeometry() {
   const parts = [
@@ -536,40 +585,9 @@ const carMat = new THREE.ShaderMaterial({
 });
 const cars = new THREE.InstancedMesh(carGeometry(), carMat, MAX_CARS);
 cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-cars.frustumCulled = false;
 cars.count = 0;
-scene.add(cars);
 const CAR_COLORS = ['#f2f2f0', '#f2f2f0', '#e9e9ea', '#1a1a1c', '#1a1a1c', '#8d9096', '#5a5d63', '#b8bcc2', '#9e1b1b', '#1f3f7a', '#2b4a3a', '#6f2a5a', '#c9772a'];
 const TAXI = { taipei: '#f4c20d', tokyo: '#151515', newyork: '#f7b500', hongkong: '#c8102e' };
-
-// trees: low-poly trunk + canopy, scattered on parks
-const MAX_TREES = 3500;
-function treeGeometry() {
-  const parts = [
-    new THREE.CylinderGeometry(0.22, 0.3, 2.6, 5).translate(0, 1.3, 0),
-    new THREE.IcosahedronGeometry(2.4, 0).scale(1, 1.25, 1).translate(0, 4.6, 0),
-  ];
-  const pos = [], nrm = [];
-  for (const g of parts) {
-    const ng = g.toNonIndexed();
-    ng.computeVertexNormals();
-    pos.push(...ng.getAttribute('position').array);
-    nrm.push(...ng.getAttribute('normal').array);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
-  return g;
-}
-const treeMat = new THREE.ShaderMaterial({
-  vertexShader: SHADERS['fold.glsl'] + SHADERS['tree.vert'],
-  fragmentShader: LIGHT + SHADERS['tree.frag'],
-  uniforms: { ...foldUniforms, ...lightUniforms, uCanopy: { value: cur.canopy }, uBlossom: { value: cur.blossom }, uBlossomAmt: { value: 0 } },
-});
-const trees = new THREE.InstancedMesh(treeGeometry(), treeMat, MAX_TREES);
-trees.frustumCulled = false;
-trees.count = 0;
-scene.add(trees);
 
 // pedestrians: point sprites, positions updated from the same graph walker
 const MAX_PEOPLE = 6000;
@@ -586,9 +604,32 @@ const peopleMat = new THREE.ShaderMaterial({
     uPixelRatio: { value: renderer.getPixelRatio() }, uViewH: { value: 1 },
   },
 });
-const people = new THREE.Points(peopleGeo, peopleMat);
-people.frustumCulled = false;
-scene.add(people);
+
+// Dynamic layers (cars, people) are drawn once per visible tile: clones share the
+// buffers, and each clone sets the tile uniform right before its draw call.
+class TileClones {
+  constructor(make, material) {
+    this.material = material;
+    this.clones = [];
+    for (let k = 0; k < MAX_TILES; k++) {
+      const obj = make();
+      obj.frustumCulled = false;
+      obj.visible = false;
+      obj.onBeforeRender = () => { material.uniforms.uTile.value.set(obj.userData.i, obj.userData.j, -1); material.uniformsNeedUpdate = true; };
+      scene.add(obj);
+      this.clones.push(obj);
+    }
+  }
+  update(tiles, sync) { // tiles: array of [i, j]
+    this.clones.forEach((obj, k) => {
+      const t = tiles[k];
+      obj.visible = !!t;
+      if (t) { obj.userData.i = t[0]; obj.userData.j = t[1]; sync?.(obj); }
+    });
+  }
+}
+const carClones = new TileClones(() => { const m = new THREE.InstancedMesh(cars.geometry, carMat, MAX_CARS); m.instanceMatrix = cars.instanceMatrix; return m; }, carMat);
+const peopleClones = new TileClones(() => new THREE.Points(peopleGeo, peopleMat), peopleMat);
 
 const skyMat = new THREE.ShaderMaterial({
   vertexShader: SHADERS['sky.vert'],
@@ -597,8 +638,9 @@ const skyMat = new THREE.ShaderMaterial({
   uniforms: {
     uSkyTop: { value: cur.skyTop }, uSkyBottom: { value: cur.skyBottom },
     uSunDir: { value: cur.sunDir }, uSunColor: { value: cur.sunColor },
-    uIntensity: foldUniforms.uIntensity, uTime: foldUniforms.uTime,
+    uTime: foldUniforms.uTime,
     uNight: nightUniform,
+    uFogColor: { value: cur.fog },
   },
 });
 const sky = new THREE.Mesh(new THREE.SphereGeometry(6000, 32, 16), skyMat);
@@ -606,7 +648,7 @@ sky.frustumCulled = false;
 sky.renderOrder = -1;
 scene.add(sky);
 
-// particles
+// particles drift through the tunnel around the viewer
 const PARTICLES = 2600;
 const seeds = new Float32Array(PARTICLES * 3);
 for (let i = 0; i < seeds.length; i++) seeds[i] = Math.random();
@@ -627,10 +669,11 @@ const partMat = new THREE.ShaderMaterial({
 });
 const particles = new THREE.Points(partGeo, partMat);
 particles.frustumCulled = false;
+particles.position.y = -240; // centre the drift box on the viewer
 scene.add(particles);
 
 // post-processing
-const rtOpts = { samples: 4, wrapS: THREE.MirroredRepeatWrapping, wrapT: THREE.MirroredRepeatWrapping, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true };
+const rtOpts = { samples: 4, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true };
 let rt = new THREE.WebGLRenderTarget(2, 2, rtOpts);
 const postScene = new THREE.Scene();
 const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -640,9 +683,9 @@ const postMat = new THREE.ShaderMaterial({
   depthTest: false, depthWrite: false,
   uniforms: {
     tDiffuse: { value: rt.texture },
-    uIntensity: foldUniforms.uIntensity, uTime: foldUniforms.uTime,
     uAspect: { value: 1 },
     uGrade: { value: cur.grade }, uSaturation: { value: 1 }, uVignette: { value: 0.3 },
+    uFade: { value: 1 },
   },
 });
 postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat));
@@ -662,78 +705,219 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
-// ---------------------------------------------------------------- camera controller
-const orbit = {
-  target: new THREE.Vector3(0, 40, 0),
-  theta: 0.6, phi: 1.12, radius: 720,
-  autoSpeed: 0.045, // rad/s
-  lastInteraction: -1e9,
+// ---------------------------------------------------------------- camera: fixed in the middle, look around
+const view = {
+  yaw: 0, pitch: -0.05, fov: 65,
   dragging: false, lastX: 0, lastY: 0, pinchDist: 0,
-  vTheta: 0, vPhi: 0,
+  vYaw: 0, vPitch: 0,
 };
-for (const k of ['theta', 'phi', 'radius']) { const v = parseFloat(HASH[k]); if (Number.isFinite(v)) orbit[k] = v; } // #theta=..&phi=..&radius=.. for screenshots
 const canvas = renderer.domElement;
 const now = () => performance.now() / 1000;
-canvas.addEventListener('pointerdown', (e) => { orbit.dragging = true; orbit.lastX = e.clientX; orbit.lastY = e.clientY; orbit.lastInteraction = now(); canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointerdown', (e) => { view.dragging = true; view.lastX = e.clientX; view.lastY = e.clientY; canvas.setPointerCapture(e.pointerId); });
 canvas.addEventListener('pointermove', (e) => {
-  if (!orbit.dragging) return;
-  const dx = e.clientX - orbit.lastX, dy = e.clientY - orbit.lastY;
-  orbit.lastX = e.clientX; orbit.lastY = e.clientY;
-  orbit.vTheta = -dx * 0.005; orbit.vPhi = -dy * 0.004;
-  orbit.theta += orbit.vTheta; orbit.phi += orbit.vPhi;
-  orbit.lastInteraction = now();
+  if (!view.dragging) return;
+  const dx = e.clientX - view.lastX, dy = e.clientY - view.lastY;
+  view.lastX = e.clientX; view.lastY = e.clientY;
+  const k = 0.0035 * view.fov / 65;
+  view.vYaw = -dx * k; view.vPitch = -dy * k;
+  view.yaw += view.vYaw; view.pitch += view.vPitch;
 });
-const endDrag = () => { orbit.dragging = false; orbit.lastInteraction = now(); };
+const endDrag = () => { view.dragging = false; };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
-canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.radius *= Math.exp(e.deltaY * 0.0012); orbit.lastInteraction = now(); }, { passive: false });
-canvas.addEventListener('touchstart', (e) => { if (e.touches.length === 2) orbit.pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }, { passive: true });
+const setFov = (f) => { view.fov = THREE.MathUtils.clamp(f, 40, 90); };
+canvas.addEventListener('wheel', (e) => { e.preventDefault(); setFov(view.fov * Math.exp(e.deltaY * 0.001)); }, { passive: false });
+canvas.addEventListener('touchstart', (e) => { if (e.touches.length === 2) view.pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }, { passive: true });
 canvas.addEventListener('touchmove', (e) => {
   if (e.touches.length !== 2) return;
   const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-  if (orbit.pinchDist > 0) orbit.radius *= orbit.pinchDist / d;
-  orbit.pinchDist = d; orbit.lastInteraction = now();
+  if (view.pinchDist > 0) setFov(view.fov * view.pinchDist / d);
+  view.pinchDist = d;
 }, { passive: true });
 
-function updateCamera(dt, t) {
-  const idle = t - orbit.lastInteraction;
-  if (!orbit.dragging) {
-    orbit.theta += orbit.vTheta; orbit.phi += orbit.vPhi;
-    orbit.vTheta *= 0.9; orbit.vPhi *= 0.9;
-    const resume = THREE.MathUtils.smoothstep(idle, 3.0, 6.0);
-    orbit.theta += orbit.autoSpeed * dt * resume;
-    orbit.phi += (1.12 + Math.sin(t * 0.13) * 0.08 - orbit.phi) * 0.4 * dt * resume;
-  }
-  orbit.phi = THREE.MathUtils.clamp(orbit.phi, 0.25, 1.48);
-  orbit.radius = THREE.MathUtils.clamp(orbit.radius, 60, 1700);
-  const r = orbit.radius;
-  camera.position.set(
-    orbit.target.x + r * Math.sin(orbit.phi) * Math.sin(orbit.theta),
-    orbit.target.y + r * Math.cos(orbit.phi),
-    orbit.target.z + r * Math.sin(orbit.phi) * Math.cos(orbit.theta),
-  );
-  camera.lookAt(orbit.target);
-  foldUniforms.uCamAz.value = Math.atan2(-camera.position.x, camera.position.z);
-  foldUniforms.uCamDist.value = Math.hypot(camera.position.x, camera.position.z);
+function updateCamera() {
+  if (!view.dragging) { view.yaw += view.vYaw; view.pitch += view.vPitch; view.vYaw *= 0.9; view.vPitch *= 0.9; }
+  view.pitch = THREE.MathUtils.clamp(view.pitch, -Math.PI / 3, Math.PI / 3);
+  camera.position.set(0, 0, 0);
+  camera.rotation.set(view.pitch, view.yaw, 0);
+  if (Math.abs(camera.fov - view.fov) > 0.01) { camera.fov = view.fov; camera.updateProjectionMatrix(); }
   lightUniforms.uCamPos.value.copy(camera.position);
+}
+
+// ---------------------------------------------------------------- tiles: which copies of each band are in view
+const frustum = new THREE.Frustum();
+const projView = new THREE.Matrix4();
+const box = new THREE.Box3();
+const corner = new THREE.Vector3();
+const tileState = { boxR: 560, bandW: 280, visibleBands: [], visibleTiles: [] };
+function updateTiles() {
+  const N = state.fold, R = tileState.boxR, bandW = 2 * R / N, L = 2 * R;
+  const D = foldUniforms.uTunnelR.value, slide = foldUniforms.uSlide.value;
+  const jmax = Math.ceil(SURF.depth / bandW);
+  projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(projView);
+  const bands = [], tileSet = new Map();
+  for (let b = 0; b < N; b++) {
+    const th = Math.PI / 2 - 2 * Math.PI * b / N;
+    const cx = Math.cos(th), cy = Math.sin(th), tx = -Math.sin(th), ty = Math.cos(th);
+    const list = [];
+    for (let i = -SURF.sideCopies; i <= SURF.sideCopies; i++) {
+      for (let j = -jmax; j <= jmax; j++) {
+        box.makeEmpty();
+        for (let k = 0; k < 8; k++) {
+          const u = (k & 1 ? R : -R) + slide + i * L;
+          const v = (k & 2 ? bandW / 2 : -bandW / 2) + j * bandW;
+          const h = k & 4 ? D * SURF.hideH : 0;
+          corner.set(cx * (D - h) + tx * u, cy * (D - h) + ty * u, v);
+          box.expandByPoint(corner);
+        }
+        if (frustum.intersectsBox(box)) { list.push([i, j]); tileSet.set(i * 1000 + j, [i, j]); }
+      }
+    }
+    bands.push(list);
+  }
+  tileState.visibleBands = bands;
+  tileState.visibleTiles = Array.from(tileSet.values());
+  buildingLayer.update(bands); groundLayer.update(bands); roadLayer.update(bands); treeLayer.update(bands);
+  carClones.update(tileState.visibleTiles, (m) => { m.count = cars.count; m.instanceColor = cars.instanceColor; });
+  peopleClones.update(tileState.visibleTiles);
+}
+
+// ---------------------------------------------------------------- per-band geometry
+const bandOf = (z, N, R) => THREE.MathUtils.clamp(Math.floor((z + R) / (2 * R / N)), 0, N - 1);
+
+// buildings: whole buildings only, never cut. Hidden when taller than the tunnel allows,
+// when they sit on a band cut, or when they touch the seam where a band repeats.
+function buildingBands(buildings, N, R) {
+  const bandW = 2 * R / N, buf = SURF.buffer, maxH = SURF.tunnelR * SURF.hideH;
+  const groups = Array.from({ length: N }, () => []);
+  let hidden = 0;
+  for (const bld of buildings) {
+    if (bld.h > maxH) { hidden++; continue; }
+    let ok = true, cz = 0;
+    for (let i = 0; i < bld.pts.length; i += 2) {
+      const x = bld.pts[i], z = bld.pts[i + 1];
+      cz += z;
+      if (Math.abs(x) > R - buf || Math.abs(z) > R - buf) { ok = false; break; }
+      const zb = (z + R) % bandW;
+      if (zb < buf || zb > bandW - buf) { ok = false; break; }
+    }
+    if (!ok) { hidden++; continue; }
+    groups[bandOf(cz / (bld.pts.length / 2), N, R)].push(bld);
+  }
+  return { geos: groups.map(buildCityGeometry), hidden };
+}
+
+// split an indexed geometry into bands, dropping triangles outside the box or across a cut
+function splitByBand(g, N, R) {
+  const pos = g.getAttribute('position');
+  const index = g.index.array;
+  const names = Object.keys(g.attributes);
+  const out = Array.from({ length: N }, () => ({ idx: [], remap: new Map() }));
+  for (let t = 0; t < index.length; t += 3) {
+    const a = index[t], b = index[t + 1], c = index[t + 2];
+    const ba = bandOf(pos.getZ(a), N, R), bb = bandOf(pos.getZ(b), N, R), bc = bandOf(pos.getZ(c), N, R);
+    if (ba !== bb || bb !== bc) continue;
+    let inside = true;
+    for (const v of [a, b, c]) if (Math.abs(pos.getX(v)) > R || Math.abs(pos.getZ(v)) > R) { inside = false; break; }
+    if (!inside) continue;
+    const o = out[ba];
+    for (const v of [a, b, c]) {
+      if (!o.remap.has(v)) o.remap.set(v, o.remap.size);
+      o.idx.push(o.remap.get(v));
+    }
+  }
+  return out.map((o) => {
+    const ng = new THREE.BufferGeometry();
+    for (const name of names) {
+      const src = g.getAttribute(name);
+      const arr = new Float32Array(o.remap.size * src.itemSize);
+      for (const [from, to] of o.remap) for (let k = 0; k < src.itemSize; k++) arr[to * src.itemSize + k] = src.array[from * src.itemSize + k];
+      ng.setAttribute(name, new THREE.BufferAttribute(arr, src.itemSize));
+    }
+    ng.setIndex(o.idx);
+    return ng;
+  });
+}
+
+function groundBands(N, R) {
+  const bandW = 2 * R / N;
+  return Array.from({ length: N }, (_, b) => {
+    const g = new THREE.PlaneGeometry(2 * R, bandW, Math.ceil(2 * R / 25), Math.ceil(bandW / 25));
+    g.rotateX(-Math.PI / 2);
+    g.translate(0, -0.05, -R + (b + 0.5) * bandW);
+    return g;
+  });
+}
+
+// trees are baked into one static geometry per band
+const treeProto = (() => {
+  const parts = [
+    new THREE.CylinderGeometry(0.22, 0.3, 2.6, 5).translate(0, 1.3, 0),
+    new THREE.IcosahedronGeometry(2.4, 0).scale(1, 1.25, 1).translate(0, 4.6, 0),
+  ];
+  const pos = [], nrm = [];
+  for (const g of parts) {
+    const ng = g.index ? g.toNonIndexed() : g;
+    ng.computeVertexNormals();
+    pos.push(...ng.getAttribute('position').array);
+    nrm.push(...ng.getAttribute('normal').array);
+  }
+  return { pos, nrm, n: pos.length / 3 };
+})();
+function treeBands(treeXZ, count, N, R) {
+  const groups = Array.from({ length: N }, () => []);
+  for (let k = 0; k < count; k++) {
+    const x = treeXZ[2 * k], z = treeXZ[2 * k + 1];
+    if (Math.abs(x) > R || Math.abs(z) > R) continue;
+    groups[bandOf(z, N, R)].push(k);
+  }
+  const { pos: P, nrm: Nn, n } = treeProto;
+  const m = new THREE.Matrix4(), nm = new THREE.Matrix3(), v = new THREE.Vector3();
+  return groups.map((ids) => {
+    const pos = new Float32Array(ids.length * n * 3), nrm = new Float32Array(ids.length * n * 3);
+    const col = new Float32Array(ids.length * n * 3), ly = new Float32Array(ids.length * n);
+    ids.forEach((k, t) => {
+      const sc = 0.7 + 0.7 * hash01(k * 17 + 3);
+      m.makeRotationY(hash01(k * 5 + 1) * Math.PI * 2).scale(new THREE.Vector3(sc, sc * (0.9 + 0.3 * hash01(k * 3 + 9)), sc)).setPosition(treeXZ[2 * k], 0, treeXZ[2 * k + 1]);
+      nm.getNormalMatrix(m);
+      const variation = hash01(k * 11 + 2), seed = hash01(k * 23 + 5);
+      for (let i = 0; i < n; i++) {
+        const o = (t * n + i) * 3;
+        v.set(P[3 * i], P[3 * i + 1], P[3 * i + 2]).applyMatrix4(m);
+        pos[o] = v.x; pos[o + 1] = v.y; pos[o + 2] = v.z;
+        v.set(Nn[3 * i], Nn[3 * i + 1], Nn[3 * i + 2]).applyMatrix3(nm).normalize();
+        nrm[o] = v.x; nrm[o + 1] = v.y; nrm[o + 2] = v.z;
+        col[o] = variation; col[o + 1] = 0; col[o + 2] = seed;
+        ly[t * n + i] = P[3 * i + 1];
+      }
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    g.setAttribute('aTreeColor', new THREE.BufferAttribute(col, 3));
+    g.setAttribute('aLocalY', new THREE.BufferAttribute(ly, 1));
+    return g;
+  });
 }
 
 // ---------------------------------------------------------------- state
 const state = {
   cityIndex: 0,
   timeIndex: 0,
-  sliderMirror: 0.35,
-  mirror: 0.35,
-  transition: null, // { phase: 'in' | 'out', nextCity }
+  fold: 4, // number of faces, 2..6
+  fade: 0, // post-process brightness, 0 = black
+  transition: null, // { apply } : fade out, apply, fade in
+  intro: 0, // 0..1, the tunnel closing in from far away
   prevTime: 0, timeBlend: 1,
   panelHidden: false,
 };
-// defaults: Taipei by day (timeIndex 0 = day; city index 0 = Taipei, see loadCity below)
 {
   const ti = ['day', 'night'].indexOf(HASH.time);
   if (ti >= 0) state.timeIndex = ti;
-  const m = parseFloat(HASH.mirror);
-  if (Number.isFinite(m)) state.sliderMirror = THREE.MathUtils.clamp(m, 0, 1);
+  const f = parseInt(HASH.fold);
+  if (f >= 2 && f <= 6) state.fold = f;
+  foldUniforms.uSides.value = state.fold;
 }
 state.prevTime = state.timeIndex;
 setPalette(cur, TIMES[state.timeIndex]);
@@ -741,39 +925,46 @@ setPalette(cur, TIMES[state.timeIndex]);
 const decodedCities = new Map();
 let traffic = null, crowd = null;
 const carDummy = new THREE.Object3D();
+
+// (re)build the per-band layers for the current city and face count
+function buildLayers() {
+  const c = CITY_DATA[state.cityIndex];
+  const entry = decodedCities.get(c.key);
+  const N = state.fold, R = tileState.boxR;
+  const key = N;
+  if (!entry.byN.has(key)) {
+    const { geos, hidden } = buildingBands(entry.buildings, N, R);
+    entry.byN.set(key, { buildings: geos, hidden, roads: splitByBand(entry.roadGeo, N, R), ground: groundBands(N, R), trees: null });
+  }
+  const layers = entry.byN.get(key);
+  buildingLayer.set(layers.buildings);
+  roadLayer.set(layers.roads);
+  groundLayer.set(layers.ground);
+  if (layers.trees) treeLayer.set(layers.trees); else treeLayer.set([]);
+  entry.mask?.then((m) => {
+    if (!m || state.cityIndex !== CITY_DATA.indexOf(c) || state.fold !== N) return;
+    groundMat.uniforms.uMask.value = m.tex;
+    if (!layers.trees) layers.trees = treeBands(m.trees.xz, m.trees.n, N, R);
+    treeLayer.set(layers.trees);
+  });
+  $('#stats').textContent = I18N[lang].buildings(c.count - layers.hidden);
+}
+
 function loadCity(i) {
   const c = CITY_DATA[i];
   if (!decodedCities.has(c.key)) {
     const roads = decodeRoads(c.roads);
-    decodedCities.set(c.key, { geo: buildCityGeometry(decodeCity(c.data)), roadGeo: buildRoadGeometry(roads), roads });
+    decodedCities.set(c.key, { buildings: decodeCity(c.data), roadGeo: buildRoadGeometry(roads), roads, byN: new Map(), mask: null });
   }
   const entry = decodedCities.get(c.key);
-  cityMesh.geometry = entry.geo;
-  roadMesh.geometry = entry.roadGeo;
-  foldUniforms.uCurlR.value = Math.max(520, c.maxH + 90);
+  state.cityIndex = i;
+  // use the square inscribed in the fetched circle so every band is fully populated
+  tileState.boxR = Math.round((c.radius || 800) * 0.7);
+  foldUniforms.uBoxR.value = tileState.boxR;
 
-  // water / parks mask and trees arrive once the PNG has decoded
   groundMat.uniforms.uMask.value = emptyMask;
-  trees.count = 0;
-  if (!entry.mask) entry.mask = loadMask(c.areas).then((m) => ({ ...m, trees: scatterTrees(m, MAX_TREES) }));
-  entry.mask.then((m) => {
-    if (state.cityIndex !== i) return; // switched away while decoding
-    groundMat.uniforms.uMask.value = m.tex;
-    const { xz, n } = m.trees;
-    for (let k = 0; k < n; k++) {
-      const sc = 0.7 + 0.7 * hash01(k * 17 + 3);
-      carDummy.position.set(xz[2 * k], 0, xz[2 * k + 1]);
-      carDummy.rotation.set(0, hash01(k * 5 + 1) * Math.PI * 2, 0);
-      carDummy.scale.set(sc, sc * (0.9 + 0.3 * hash01(k * 3 + 9)), sc);
-      carDummy.updateMatrix();
-      trees.setMatrixAt(k, carDummy.matrix);
-      trees.setColorAt(k, new THREE.Color(hash01(k * 11 + 2), 0, hash01(k * 23 + 5)));
-    }
-    carDummy.scale.set(1, 1, 1);
-    trees.count = n;
-    trees.instanceMatrix.needsUpdate = true;
-    if (trees.instanceColor) trees.instanceColor.needsUpdate = true;
-  }).catch((e) => console.warn('area mask failed', e));
+  if (!entry.mask) entry.mask = loadMask(c.areas).then((m) => ({ ...m, trees: scatterTrees(m, MAX_TREES) })).catch((e) => { console.warn('area mask failed', e); return null; });
+  buildLayers();
 
   // traffic keeps to the driving side of each city; oneway roads are respected
   const sideSign = c.driveLeft ? -1 : 1;
@@ -809,17 +1000,28 @@ function loadCity(i) {
   for (let k = 0; k < crowd.n; k++) seeds.setXYZ(k, Math.random(), Math.random(), Math.random());
   seeds.needsUpdate = true;
   peopleGeo.setDrawRange(0, crowd.n);
-  state.cityIndex = i;
   updateTitle();
-  $('#stats').textContent = I18N[lang].buildings(c.count);
   document.querySelectorAll('#cities button').forEach((b, j) => b.classList.toggle('active', j === i));
 }
+const MAX_TREES = 3500;
 
+// fade to black, apply the change, fade back in
+function requestTransition(apply) {
+  if (state.transition) { state.transition.apply = apply; return; }
+  state.transition = { apply };
+}
 function requestCity(i) {
-  if (i === state.cityIndex && !state.transition) return;
-  if (state.transition) { state.transition.nextCity = i; return; }
-  state.transition = { phase: 'in', nextCity: i };
-  $('#title').classList.add('fade');
+  if (i === state.cityIndex) return;
+  requestTransition(() => loadCity(i));
+}
+function requestFold(n) {
+  if (n === state.fold) return;
+  requestTransition(() => {
+    state.fold = n;
+    foldUniforms.uSides.value = n;
+    document.querySelectorAll('#folds button').forEach((b, j) => b.classList.toggle('active', j === n - 2));
+    buildLayers();
+  });
 }
 
 function setTime(i) {
@@ -844,7 +1046,9 @@ function applyLang() {
   $('#lang').textContent = I18N[lang].lang;
   document.querySelectorAll('#cities button').forEach((b, i) => { b.firstChild.textContent = CITY_DATA[i].name[lang]; });
   document.querySelectorAll('#times button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].times[i]; });
-  $('#stats').textContent = I18N[lang].buildings(CITY_DATA[state.cityIndex].count);
+  document.querySelectorAll('#folds button').forEach((b, i) => { b.firstChild.textContent = I18N[lang].folds[i]; });
+  const entry = decodedCities.get(CITY_DATA[state.cityIndex].key);
+  $('#stats').textContent = I18N[lang].buildings(CITY_DATA[state.cityIndex].count - (entry?.byN.get(state.fold)?.hidden || 0));
   updateTitle();
 }
 function makeButtons(container, items, keys, onClick) {
@@ -861,28 +1065,19 @@ function makeButtons(container, items, keys, onClick) {
 makeButtons($('#cities'), CITY_DATA.map((c) => c.name[lang]), ['1', '2', '3', '4', '5'], requestCity);
 makeButtons($('#times'), I18N[lang].times, ['Q', 'W'], setTime);
 document.querySelectorAll('#times button')[state.timeIndex].classList.add('active');
-
-const slider = $('#mirror');
-const setSlider = (v) => {
-  state.sliderMirror = THREE.MathUtils.clamp(v, 0, 1);
-  slider.value = state.sliderMirror;
-  $('#mirrorVal').textContent = Math.round(state.sliderMirror * 100) + '%';
-};
-slider.addEventListener('input', () => setSlider(parseFloat(slider.value)));
-setSlider(state.sliderMirror);
+makeButtons($('#folds'), I18N[lang].folds, ['A', 'S', 'D', 'F', 'G'], (i) => requestFold(i + 2));
+document.querySelectorAll('#folds button')[state.fold - 2].classList.add('active');
 
 $('#lang').addEventListener('click', () => { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); });
 
 addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement && e.key.startsWith('Arrow')) return;
   const k = e.key.toLowerCase();
   if (k >= '1' && k <= '5') requestCity(parseInt(k) - 1);
   else if (k === 'q') setTime(0);
   else if (k === 'w') setTime(1);
+  else if ('asdfg'.includes(k) && k.length === 1) requestFold('asdfg'.indexOf(k) + 2);
   else if (k === 'h') { state.panelHidden = !state.panelHidden; $('#panel').classList.toggle('hidden', state.panelHidden); }
   else if (k === 'l') { lang = lang === 'zh' ? 'en' : 'zh'; applyLang(); }
-  else if (k === '[') setSlider(state.sliderMirror - 0.05);
-  else if (k === ']') setSlider(state.sliderMirror + 0.05);
 });
 
 // ---------------------------------------------------------------- main loop
@@ -894,20 +1089,22 @@ function frame() {
   last = t;
   const elapsed = t - t0;
 
-  // city transition: fold up fully, swap geometry, unfold
-  let mirrorTarget = state.sliderMirror;
+  // intro: the tunnel closes in from three times its radius
+  state.intro = Math.min(1, state.intro + dt / 2.0);
+  const ease = 1 - Math.pow(1 - state.intro, 3);
+  foldUniforms.uTunnelR.value = SURF.tunnelR * (3 - 2 * ease);
+
+  // transitions: fade out, apply, fade in
+  let fadeTarget = 1;
   if (state.transition) {
-    if (state.transition.phase === 'in') {
-      mirrorTarget = 1;
-      if (state.mirror > 0.965) { loadCity(state.transition.nextCity); state.transition.phase = 'out'; $('#title').classList.remove('fade'); }
-    } else if (Math.abs(state.mirror - state.sliderMirror) < 0.02) {
-      state.transition = null;
-    }
+    fadeTarget = 0;
+    if (state.fade < 0.03) { state.transition.apply(); state.transition = null; fadeTarget = 1; }
   }
-  const rate = state.transition?.phase === 'in' ? 3.2 : 2.2;
-  state.mirror += (mirrorTarget - state.mirror) * (1 - Math.exp(-dt * rate));
-  foldUniforms.uIntensity.value = state.mirror;
+  state.fade += (fadeTarget - state.fade) * (1 - Math.exp(-dt * 9));
+  postMat.uniforms.uFade.value = state.fade * ease;
+
   foldUniforms.uTime.value = elapsed;
+  foldUniforms.uSlide.value = (SURF.speed * elapsed) % (2 * tileState.boxR);
 
   // day / night interpolation
   state.timeBlend = Math.min(1, state.timeBlend + dt / 1.6);
@@ -917,7 +1114,7 @@ function frame() {
   partMat.uniforms.uOpacity.value = cur.opacity * (1 - 0.9 * Math.sin(state.timeBlend * Math.PI) ** 2);
   partMat.uniforms.uFall.value = cur.fall; partMat.uniforms.uSway.value = cur.sway;
   partMat.uniforms.uSize.value = cur.size; partMat.uniforms.uSpin.value = cur.spin;
-  lightUniforms.uFogDensity.value = cur.fogDensity;
+  lightUniforms.uFogDensity.value = cur.fogDensity * 1.4;
   buildingMat.uniforms.uWindowLit.value = cur.windowLit;
   nightUniform.value = THREE.MathUtils.smoothstep(cur.windowLit, 0.25, 0.7);
   treeMat.uniforms.uBlossomAmt.value = cur.blossomAmt;
@@ -940,7 +1137,9 @@ function frame() {
   postMat.uniforms.uSaturation.value = cur.saturation;
   postMat.uniforms.uVignette.value = cur.vignette;
 
-  updateCamera(dt, t);
+  updateCamera();
+  camera.updateMatrixWorld();
+  updateTiles();
 
   renderer.setRenderTarget(rt);
   renderer.render(scene, camera);
@@ -957,8 +1156,9 @@ await new Promise((r) => requestAnimationFrame(r));
   const ci = Number.isInteger(+HASH.city) ? CITY_DATA.findIndex((c, i) => c.key === HASH.city || i === +HASH.city) : CITY_DATA.findIndex((c) => c.key === HASH.city);
   loadCity(ci >= 0 ? ci : 0);
 }
-state.mirror = HASH.intro === '0' ? state.sliderMirror : 1; // start folded, then unfold into the first city
+if (HASH.intro === '0') state.intro = 1;
+for (const k of ['yaw', 'pitch', 'fov']) { const v = parseFloat(HASH[k]); if (Number.isFinite(v)) view[k] = v; } // #yaw=&pitch=&fov= for screenshots
 requestAnimationFrame(frame);
 setTimeout(() => $('#loading').classList.add('done'), 150);
 console.info('mirror-dimension', BUILD_INFO);
-window.__md = { state, cur, trees, treeMat, cars, decodedCities }; // debugging handle
+window.__md = { state, cur, view, tileState, cars, decodedCities, foldUniforms, groundLayer, buildingLayer, roadLayer, treeLayer, renderer }; // debugging handle

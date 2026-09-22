@@ -1,5 +1,4 @@
 precision highp float;
-uniform float uIntensity;
 uniform float uTime;
 uniform float uNight;
 varying vec3 vWorld;
@@ -23,7 +22,6 @@ void main() {
   float rear = step(0.9, -n.x) * lightBand;
   c += vec3(1.0, 0.95, 0.8) * front * (0.25 + 1.4 * uNight);
   c += vec3(1.0, 0.12, 0.08) * rear * (0.35 + 0.9 * uNight);
-  c += iridescence(vWorld, n, uIntensity, uTime) * 0.6;
   c = applyFog(c, vWorld);
   gl_FragColor = vec4(c, 1.0);
 }

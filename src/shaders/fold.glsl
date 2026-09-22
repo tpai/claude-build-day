@@ -1,43 +1,29 @@
-// Shared "mirror dimension" world fold. All folded meshes sit at identity
-// transform, so `position` is already world space.
-uniform float uIntensity;   // 0 = normal city, 1 = fully folded
+// Shared "mirror dimension" mapping. The city is cut into N equal bands along z;
+// band b is laid on the b-th of N infinite planes that surround the viewer like
+// a prism-shaped tunnel (face 0 on top, then clockwise). Each plane repeats its
+// band along both axes and slides sideways, so the surfaces never end. All
+// meshes sit at identity transform: `position` is the original city space.
 uniform float uTime;
-uniform float uCamAz;       // camera azimuth, rotates the curl to face the viewer
-uniform float uCamDist;     // camera horizontal distance from origin
-uniform float uCurlR;       // curl radius at full intensity
+uniform float uSides;     // number of faces, 2 .. 6
+uniform float uBoxR;      // half size of the square of city that is used (metres)
+uniform float uTunnelR;   // distance from the viewer to each face (metres)
+uniform float uSlide;     // sideways offset of the surfaces (metres, wraps at 2 * uBoxR)
+uniform vec3 uTile;       // dynamic meshes: (copy along the slide, copy along the tunnel, band or -1 = derive from z)
 
-vec3 mirrorFold(vec3 p0) {
-  float k = uIntensity;
-  if (k < 0.0005) return p0;
-  vec3 p = p0;
-  float d = length(p.xz);
+const float FOLD_PI = 3.14159265;
 
-  // slow twist around the vertical axis, grows with distance
-  float tw = k * k * 0.0010 * d * sin(uTime * 0.25 + d * 0.003);
-  float c = cos(tw), s = sin(tw);
-  p.xz = mat2(c, -s, s, c) * p.xz;
-
-  // into camera frame: camera ends up at (0, +uCamDist)
-  float ca = cos(uCamAz), sa = sin(uCamAz);
-  vec2 q2 = mat2(ca, -sa, sa, ca) * p.xz;
-
-  // curl the world up in front of the viewer (Inception style)
-  float R = mix(2500.0, uCurlR, k);
-  float ang = (q2.y - uCamDist) / R;
-  float r = R - p.y;
-  vec3 q = vec3(q2.x, R - r * cos(ang), uCamDist + r * sin(ang));
-
-  // gentle side bowl
-  float R2 = mix(4000.0, 1400.0, k);
-  float a2 = q.x / R2;
-  float r2 = R2 - q.y;
-  q = vec3(r2 * sin(a2), R2 - r2 * cos(a2), q.z);
-
-  // back to world frame
-  q.xz = mat2(ca, sa, -sa, ca) * q.xz;
-
-  // breathing ripple
-  q.y += k * 5.0 * sin(d * 0.02 - uTime * 0.8);
-
-  return mix(p0, q, smoothstep(0.0, 1.0, k));
+// tile: x = copy index along the slide direction, y = copy index along the tunnel axis,
+// z = band index, or < 0 to derive it from p.z
+vec3 mirrorFold(vec3 p, vec3 tile) {
+  float N = uSides;
+  float bandW = 2.0 * uBoxR / N;
+  float b = tile.z >= 0.0 ? tile.z : clamp(floor((p.z + uBoxR) / bandW), 0.0, N - 1.0);
+  float bandCentre = -uBoxR + (b + 0.5) * bandW;
+  float u = p.x + uSlide + tile.x * 2.0 * uBoxR;      // along the face, sideways for the viewer
+  float v = (p.z - bandCentre) + tile.y * bandW;      // along the tunnel axis
+  float th = 0.5 * FOLD_PI - 2.0 * FOLD_PI * b / N;   // face 0 at the top, then clockwise
+  vec2 c = vec2(cos(th), sin(th));                    // face centre direction
+  vec2 t = vec2(-sin(th), cos(th));                   // slide direction (same rotational sense on every face)
+  vec2 xy = c * uTunnelR - c * p.y + t * u;           // surface normal points at the viewer
+  return vec3(xy.x, xy.y, v); // a rotation, never a reflection: windings stay intact
 }

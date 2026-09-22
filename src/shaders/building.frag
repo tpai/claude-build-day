@@ -1,5 +1,4 @@
 precision highp float;
-uniform float uIntensity;
 uniform float uTime;
 uniform vec3 uBuildingTint;
 uniform vec3 uWindowColor;
@@ -125,7 +124,6 @@ void main() {
     c = base * shade(n);
   }
 
-  c += iridescence(vWorld, n, uIntensity, uTime);
   c = applyFog(c, vWorld);
   gl_FragColor = vec4(c, 1.0);
 }

@@ -463,7 +463,7 @@ async function main() {
     const roads = processRoads(city, roadsRaw);
     const areasRaw = await fetchOverpass(city, 'areas');
     const areas = processAreas(city, areasRaw);
-    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads), areas });
+    cities.push({ key: city.key, name: city.name, sub: city.sub, lat: city.lat, lon: city.lon, radius: city.radius ?? RADIUS_M, driveLeft: !!city.driveLeft, count, maxH: Math.round(maxH), data: encode(buildings), roads: encodeRoads(roads), areas });
     if (!REFETCH) continue;
     await sleep(2000); // be polite to Overpass
   }

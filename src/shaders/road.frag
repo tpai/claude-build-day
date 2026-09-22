@@ -1,5 +1,4 @@
 precision highp float;
-uniform float uIntensity;
 uniform float uTime;
 uniform float uNight;      // 0 day .. 1 night, lifts the street lamp glow
 uniform vec3 uWindowColor;
@@ -57,9 +56,6 @@ void main() {
   }
   vec3 n = vec3(0.0, 1.0, 0.0);
   c *= shade(n);
-  // faint sheen in the mirror dimension
-  vec3 irid = 0.5 + 0.5 * cos(6.2831 * (length(vFlat) * 0.002 + vec3(0.0, 0.33, 0.67)) - uTime * 0.3);
-  c += uIntensity * irid * 0.06;
   c = applyFog(c, vWorld);
   gl_FragColor = vec4(c, 1.0);
 }
